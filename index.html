@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ETH/USDT 15分监控</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0b0f16">
+  <style>
+    :root{--bg:#0b0f16;--card:#141b25;--text:#e7eef7;--muted:#9bb0c5;--good:#26d07c;--bad:#ff6b6b;--accent:#4da3ff;}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,PingFang SC,Microsoft Yahei,sans-serif}
+    header{padding:18px 16px 8px;font-weight:700;font-size:22px;letter-spacing:.5px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:0 16px 12px}
+    button{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:10px 14px;font-weight:600}
+    button.alt{background:#22324a;color:var(--text)}
+    .grid{display:grid;grid-template-columns:1fr;gap:12px;padding:12px 16px}
+    .card{background:var(--card);border:1px solid #213047;border-radius:16px;padding:14px 14px}
+    .small{color:var(--muted);font-size:12px}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace}
+    .signal{font-size:18px;line-height:1.5}
+    .ok{color:var(--good)} .no{color:var(--bad)}
+    .timer{position:fixed;right:14px;bottom:14px;background:#213047;color:#d7e7ff;border-radius:999px;padding:8px 12px;font-variant-numeric:tabular-nums}
+    a{color:#8bc1ff;text-decoration:none}
+  </style>
+</head>
+<body>
+  <header>ETH/USDT <span class="small">15 分钟监控</span></header>
+  <div class="row">
+    <button id="refresh">立即刷新</button>
+    <button id="toggleNotify" class="alt">开启通知</button>
+    <span class="small" id="lastUpdate">—</span>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <div id="signal" class="signal">✖ 暂不建议</div>
+      <div class="small" id="detail">加载中…</div>
+    </div>
+    <div class="card">
+      <div class="small">当前价格</div>
+      <div class="mono" id="price">—</div>
+      <div class="small" id="hl">H: —  |  L: —</div>
+    </div>
+    <div class="card">
+      <div class="small">均线与距离</div>
+      <div class="mono" id="mas">—</div>
+    </div>
+    <div class="card">
+      <div class="small">斜率（近10根）</div>
+      <div class="mono" id="slope">—</div>
+    </div>
+    <div class="card">
+      <div class="small">对冲 Meme 选择</div>
+      <div class="mono" id="meme">—</div>
+    </div>
+    <div class="card small">
+      <b>策略说明</b><br>
+      USE 触发条件需同时满足：<br>
+      1) 价格靠近均线：close 介于 EMA34 与 EMA144 之间，或 |close−EMA34|/close ≤ 0.5% 且 |close−EMA144|/close ≤ 0.5%。<br>
+      2) 均线走平：|EMA34_now−EMA34_10bars_ago|/EMA34_now ≤ 0.3%，且 |EMA144_now−EMA144_10bars_ago|/EMA144_now ≤ 0.2%。<br>
+      满足则输出“可开双向”，否则“暂不建议”。
+    </div>
+  </div>
+  <div class="timer"><span class="small">下次刷新：</span><span id="countdown">15:00</span></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
