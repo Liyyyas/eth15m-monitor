@@ -3,82 +3,82 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>ETH/USDT | 15 分钟监控</title>
+  <title>ETH/USDT 15分钟监控</title>
   <style>
-    :root { color-scheme: dark; }
-    body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC","Hiragino Sans GB","Microsoft YaHei", "Helvetica Neue", Arial, sans-serif; background:#0f1115; color:#eaeef2; }
-    .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px 56px; }
-    h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: .5px; }
-    .sub { opacity:.75; font-size: 14px; margin-left: 6px; }
-    .row { display:flex; gap:12px; margin: 12px 0 16px; align-items:center; }
-    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #2a2f3a; background:#141822; color:#eaeef2; font-size: 14px; }
-    button:active { transform: scale(.98); }
-    .card { background:#131720; border:1px solid #242a36; border-radius: 16px; padding:16px; margin: 14px 0; }
-    .title { font-weight:600; font-size: 16px; margin-bottom: 8px; opacity:.9; }
-    .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
-    .big { font-size: 22px; }
-    .ok { color:#30d158; }
-    .bad { color:#ff453a; }
-    .muted { opacity:.7 }
-    .footer { position: fixed; right: 16px; bottom: 14px; background:#12161f; border:1px solid #232a37; border-radius: 14px; padding: 8px 12px; font-size: 12px; }
-    .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#3b82f6; }
-    a { color:#8ab4ff; text-decoration: none; }
+    :root{--bg:#0b0f16;--card:#141b25;--muted:#a3b1c2;--good:#34d399;--bad:#f87171;--ink:#e6edf3;--accent:#22324a;}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"PingFang SC","Microsoft YaHei",sans-serif;}
+    a{color:#8ab4ff;text-decoration:none}
+    header{padding:18px 16px 8px;border-bottom:1px solid #1e2a3a;background:linear-gradient(180deg,#0b0f16,#0b0f1600)}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .title{font-size:28px;font-weight:900;letter-spacing:1px}
+    .sub{opacity:.8;margin-left:8px}
+    button{background:var(--accent);color:var(--ink);border:1px solid #2a3b55;border-radius:10px;padding:10px 14px;font-weight:700}
+    button.alt{background:#22324a;}
+    button:active{transform:translateY(1px)}
+    .grid{display:grid;grid-template-columns:1fr;gap:14px;padding:16px;max-width:880px;margin:0 auto}
+    .card{background:var(--card);border:1px solid #22324a;border-radius:16px;padding:16px}
+    .small{color:var(--muted);font-size:12px}
+    .signal{font-size:18px;line-height:1.5}
+    .ok{color:var(--good)} .no{color:var(--bad)}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;}
+    .row-end{margin-left:auto}
+    .chip{background:#1a2333;border:1px solid #24324a;color:#9fb3c8;padding:2px 8px;border-radius:999px;font-size:12px}
+    .footer{opacity:.7;text-align:center;padding:24px 16px}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>ETH/USDT <span class="sub">15 分钟监控</span></h1>
-
+  <header>
     <div class="row">
-      <button id="btn-now">立即刷新</button>
-      <button id="btn-notify">开启通知</button>
-      <span id="nextTick" class="muted">—</span>
+      <div class="title">ETH/USDT <span class="sub">15 分钟监控</span></div>
+      <div class="row-end chip">下一次刷新：<span id="nextAt">--:--</span></div>
     </div>
-
-    <div class="card" id="signalCard">
-      <div class="title">信号</div>
-      <div id="signalText" class="big mono muted">加载中…</div>
+    <div class="row" style="margin-top:10px;">
+      <button id="btnNow">立即刷新</button>
+      <button id="btnNotify" class="alt">开启通知</button>
+      <span class="chip">倒计时：<span id="countdown">--:--</span></span>
     </div>
+  </header>
 
-    <div class="card">
-      <div class="title">当前价格</div>
-      <div class="mono" id="priceLine">—</div>
-      <div class="mono muted" id="hlLine">H: — | L: —</div>
-    </div>
+  <main class="grid">
+    <section class="card">
+      <div class="small">信号</div>
+      <div id="signal" class="signal mono">加载中…</div>
+    </section>
 
-    <div class="card">
-      <div class="title">均线与距离</div>
-      <div class="mono" id="maLine">—</div>
-    </div>
+    <section class="card">
+      <div class="small">当前价格</div>
+      <div id="price" class="mono">—</div>
+      <div class="small">H / L （15m K线）</div>
+      <div id="hl" class="mono">H: —  |  L: —</div>
+    </section>
 
-    <div class="card">
-      <div class="title">斜率（近 10 根）</div>
-      <div class="mono" id="slopeLine">—</div>
-    </div>
+    <section class="card">
+      <div class="small">均线与距离</div>
+      <div id="dist" class="mono">—</div>
+    </section>
 
-    <div class="card">
-      <div class="title">对冲 Meme 选择</div>
-      <div class="mono" id="memeLine">—</div>
-    </div>
+    <section class="card">
+      <div class="small">斜率（近 10 根）</div>
+      <div id="slope" class="mono">—</div>
+    </section>
 
-    <div class="card">
-      <div class="title">策略说明</div>
-      <div class="mono muted" style="line-height:1.6">
-        USE 触发条件需同时满足：<br/>
-        1) 价格靠近均线：<br/>
-        &nbsp;&nbsp;close 介于 EMA34 与 EMA144 之间，或 |close−EMA34|/close ≤ 0.5% 且 |close−EMA144|/close ≤ 0.5%。<br/>
-        2) 均线走平：<br/>
-        &nbsp;&nbsp;|EMA34_now−EMA34_10bars_ago|/EMA34_now ≤ 0.3%，且 |EMA144_now−EMA144_10bars_ago|/EMA144_now ≤ 0.2%。<br/><br/>
-        满足则输出：<br/>
-        ✅ 可开双向 | close=…，EMA34=…，EMA144=…，距离=…/… | 方向：ETH任一向，Meme反向 | 对冲币：&lt;symbol&gt; | ETH止损6%、止盈10%；Meme止损10%、止盈10%；+8%移保本，+15%启用2%移动止盈。<br/>
-        否则输出：<br/>
-        ❌ 暂不建议 | close=…，EMA34=…，EMA144=…，距离=…/… | 斜率=…（上/下/走平）
+    <section class="card">
+      <div class="small">策略说明</div>
+      <div class="mono" style="white-space:pre-wrap">
+USE 触发条件需同时满足：
+1) 价格靠近均线：close 介于 EMA34 与 EMA144 之间，或
+   |close−EMA34|/close ≤ 0.5% 且 |close−EMA144|/close ≤ 0.5%
+2) 均线走势：|EMA34_now−EMA34_10bars_ago|/EMA34_now ≤ 0.3%，且
+   |EMA144_now−EMA144_10bars_ago|/EMA144_now ≤ 0.2%
+
+满足则输出「可开双向」，否则「暂不建议」。
       </div>
-    </div>
-  </div>
+    </section>
+  </main>
 
-  <div class="footer"><span class="dot"></span><span id="countdown">下次刷新：—</span></div>
+  <div class="footer small">数据源：OKX 公共 API（经 AllOrigins 代理） · 本工具仅作信息展示 · 不构成投资建议</div>
 
-  <script src="script.js"></script>
+  <script src="./script.js"></script>
 </body>
 </html>
