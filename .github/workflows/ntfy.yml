@@ -1,8 +1,10 @@
 name: ETH15m ntfy Notifier
+
 on:
   schedule:
-    - cron: "*/15 * * * *"     # 每15分钟跑一次
-  workflow_dispatch: {}         # 支持手动触发
+    - cron: "*/15 * * * *"     # 每15分钟
+  workflow_dispatch: {}         # 支持手动运行
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -10,7 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+        with:
+          node-version: 20
       - run: node ntfy_notifier.js
         env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          NTFY_TOPIC:  ${{ secrets.NTFY_TOPIC }}
