@@ -1,51 +1,34 @@
-name: ETH15m ntfy Notifier
+name: ETH 15m Close Monitor → ntfy
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # 每15分钟运行一次
-  workflow_dispatch: {}      # 支持手动触发
+    - cron: "*/1 * * * *"   # 每分钟跑一次，用于捕捉15m收盘后1分钟内推送
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    permissions:
+      contents: write        # 允许把状态文件提交到仓库（用于“最近检测”与去重）
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch page
-        id: fetch
-        run: |
-          set -e
-          URL="${{ secrets.TARGET_URL }}"
-          HTML="$(curl -fsSL "$URL")"
-          echo "html<<EOF" >> $GITHUB_OUTPUT
-          echo "$HTML" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Decide status
-        id: decide
-        run: |
-          HTML='${{ steps.fetch.outputs.html }}'
-          if echo "$HTML" | grep -q "可开双向"; then
-            echo "status=USE" >> $GITHUB_OUTPUT
-            echo "title=✅ 可开双向" >> $GITHUB_OUTPUT
-          else
-            echo "status=NOUSE" >> $GITHUB_OUTPUT
-            echo "title=❌ 暂不建议" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Send ntfy message
+      - name: Run 15m close monitor
         env:
-          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
-          NTFY_TOPIC:  ${{ secrets.NTFY_TOPIC }}
-          TARGET_URL:  ${{ secrets.TARGET_URL }}
-          TITLE:       ${{ steps.decide.outputs.title }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}   # 例: https://ntfy.sh
+          NTFY_TOPIC:  ${{ secrets.NTFY_TOPIC }}    # 你的topic
+        run: |
+          node monitor_15m_close.js
+
+      - name: Commit status if changed
         run: |
           set -e
-          MSG="ETH/USDT 15m 信号: ${TITLE}\n查看页面: ${TARGET_URL}"
-          curl -fsS -X POST \
-            -H "Title: ${TITLE}" \
-            -H "Click: ${TARGET_URL}" \
-            -H "Tags: bell" \
-            -d "$MSG" \
-            "${NTFY_SERVER}/${NTFY_TOPIC}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .state/last_ts.txt status.json || true
+          git diff --cached --quiet || git commit -m "chore: update 15m status"
+          git push
