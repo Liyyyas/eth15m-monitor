@@ -2,8 +2,8 @@ name: ETH15m ntfy Notifier
 
 on:
   schedule:
-    - cron: "*/15 * * * *"     # 每15分钟
-  workflow_dispatch: {}         # 支持手动运行
+    - cron: "*/15 * * * *"  # 每15分钟运行一次
+  workflow_dispatch: {}      # 支持手动触发
 
 jobs:
   run:
@@ -11,11 +11,41 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: node ntfy_notifier.js
+
+      - name: Fetch page
+        id: fetch
+        run: |
+          set -e
+          URL="${{ secrets.TARGET_URL }}"
+          HTML="$(curl -fsSL "$URL")"
+          echo "html<<EOF" >> $GITHUB_OUTPUT
+          echo "$HTML" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Decide status
+        id: decide
+        run: |
+          HTML='${{ steps.fetch.outputs.html }}'
+          if echo "$HTML" | grep -q "可开双向"; then
+            echo "status=USE" >> $GITHUB_OUTPUT
+            echo "title=✅ 可开双向" >> $GITHUB_OUTPUT
+          else
+            echo "status=NOUSE" >> $GITHUB_OUTPUT
+            echo "title=❌ 暂不建议" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send ntfy message
         env:
-          TARGET_URL: ${{ secrets.TARGET_URL }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           NTFY_TOPIC:  ${{ secrets.NTFY_TOPIC }}
+          TARGET_URL:  ${{ secrets.TARGET_URL }}
+          TITLE:       ${{ steps.decide.outputs.title }}
+        run: |
+          set -e
+          MSG="ETH/USDT 15m 信号: ${TITLE}\n查看页面: ${TARGET_URL}"
+          curl -fsS -X POST \
+            -H "Title: ${TITLE}" \
+            -H "Click: ${TARGET_URL}" \
+            -H "Tags: bell" \
+            -d "$MSG" \
+            "${NTFY_SERVER}/${NTFY_TOPIC}"
