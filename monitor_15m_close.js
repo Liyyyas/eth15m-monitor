@@ -1,5 +1,6 @@
 // monitor_15m_close.js
-// 云端每分钟跑：仅在“出现新收盘的15m K线”时计算 & 推送到 ntfy，并把状态写入 status.json
+// 云端每分钟跑：仅在“出现新收盘的15m K线”时计算；只在状态变化时推送到 ntfy；
+// 并把状态写入 status.json，供网页展示“最近检测”。
 
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +12,7 @@ const INST_ID = 'ETH-USDT';
 const BAR = '15m';
 const STATE_DIR = path.join(process.cwd(), '.state');
 const STATE_FILE = path.join(STATE_DIR, 'last_ts.txt');
+const HASH_FILE = path.join(STATE_DIR, 'last_hash.txt'); // 新增: 记录上一次信号状态
 const STATUS_JSON = path.join(process.cwd(), 'status.json');
 
 const pct = (a,b)=> (a-b)/b*100;
@@ -43,15 +45,13 @@ async function getCandles(instId=INST_ID, bar=BAR, limit=210){
 }
 
 async function pickMeme(){
-  // 候选池：成交额最高者；若API字段缺失，回退按 volCcy/volCcyQuote；都没有则默认PEPE
   const candidates = ['PEPE-USDT','DOGE-USDT','SHIB-USDT','FLOKI-USDT'];
   const tickers = await okxJSON('https://www.okx.com/api/v5/market/tickers?instType=SPOT');
-
   let best = null;
   for (const sym of candidates){
     const row = tickers.find(x=>x.instId===sym);
     if (!row) continue;
-    const vol = parseFloat(row.volCcyQuote || row.volCcy || row.vol || '0'); // 多重兜底
+    const vol = parseFloat(row.volCcyQuote || row.volCcy || row.vol || '0');
     if (!best || vol > best.vol) best = { sym: sym.split('-')[0], vol };
   }
   return best?.sym || 'PEPE';
@@ -96,65 +96,37 @@ async function pushNtfy(title, body){
 }
 
 function ensureDir(p){ if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive:true }); }
-
-function readLastTs(){
-  try{
-    if (fs.existsSync(STATE_FILE)) {
-      const s = fs.readFileSync(STATE_FILE,'utf8').trim();
-      const n = Number(s);
-      return Number.isFinite(n) ? n : 0;
-    }
-  }catch(e){}
-  return 0;
-}
-
-function writeLastTs(ts){
-  ensureDir(STATE_DIR);
-  fs.writeFileSync(STATE_FILE, String(ts));
-}
-
-function writeStatusJSON(payload){
-  fs.writeFileSync(STATUS_JSON, JSON.stringify(payload, null, 2));
-}
+function readFileNum(f){ try{ return Number(fs.readFileSync(f,'utf8').trim()) || 0; }catch{ return 0; } }
+function readFileStr(f){ try{ return fs.readFileSync(f,'utf8').trim(); }catch{ return ''; } }
+function writeFile(f, content){ ensureDir(path.dirname(f)); fs.writeFileSync(f, String(content)); }
+function writeStatusJSON(payload){ fs.writeFileSync(STATUS_JSON, JSON.stringify(payload, null, 2)); }
 
 (async ()=>{
-  // 1) 拉K线
   const candles = await getCandles();
-  if (candles.length < 2) {
-    console.log('Not enough candles');
-    return;
-  }
+  if (candles.length < 2) return console.log('Not enough candles');
 
-  // 2) 仅处理“上一根已收盘”的K线
   const lastClosed = candles[candles.length-2];
-  const lastTs = readLastTs();
-
-  // 3) 若这根已处理过，则仅更新 status.json 的“最近检测时间”（不重复推送/不提交）
+  const lastTs = readFileNum(STATE_FILE);
+  const lastHash = readFileStr(HASH_FILE);
   const nowIso = new Date().toISOString();
-  if (lastClosed.ts === lastTs) {
-    // 读取原状态（如有）并刷新最近检测时间
+
+  // 若没新收盘K线，仅更新时间戳
+  if (lastClosed.ts === lastTs){
     let prev = {};
     try { prev = JSON.parse(fs.readFileSync(STATUS_JSON,'utf8')); } catch {}
     prev.last_check_iso = nowIso;
     writeStatusJSON(prev);
-    console.log('Same closed candle. Updated last_check only.');
+    console.log('Same closed candle → update last_check only.');
     return;
   }
 
-  // 4) 计算指标（只到收盘那根为止）
+  // 新收盘：计算
   const closes = candles.map(c=>c.close);
-  const idx = candles.length-2;
-  const closesTillClosed = closes.slice(0, idx+1);
-  const sig = computeSignal(closesTillClosed);
-  if (!sig.ready) {
-    console.log('Not ready for EMA calc.');
-    return;
-  }
+  const idx = candles.length - 2;
+  const sig = computeSignal(closes.slice(0, idx+1));
+  if (!sig.ready) return console.log('EMA not ready');
 
-  // 5) 选择对冲 Meme
   const meme = await pickMeme();
-
-  // 6) 生成消息 & 推送
   const candleIso = new Date(lastClosed.ts).toISOString();
   const title = sig.use ? '✅ 可开双向' : '❌ 暂不建议';
   const body =
@@ -165,9 +137,17 @@ close=${fmt(sig.c)}, EMA34=${fmt(sig.a)}, EMA144=${fmt(sig.b)}
 规则：ETH止损6%/止盈10%；Meme止损10%/止盈10%；+8%保本，+15%启用2%移动止盈
 最近检测：${nowIso}`;
 
-  await pushNtfy(title, body);
+  // 状态哈希（仅在状态变化时推送）
+  const newHash = `${sig.use?'1':'0'}|${sig.direction}|${meme}`;
+  if (newHash !== lastHash){
+    await pushNtfy(title, body);
+    writeFile(HASH_FILE, newHash);
+    console.log('🔔 状态变化 → 已推送');
+  } else {
+    console.log('无状态变化 → 不推送');
+  }
 
-  // 7) 写入状态文件与网页用的 JSON（用于“最近检测”展示）
+  // 写 status.json（供网页展示）
   const statusPayload = {
     last_candle_ts: lastClosed.ts,
     last_candle_iso: candleIso,
@@ -184,10 +164,5 @@ close=${fmt(sig.c)}, EMA34=${fmt(sig.a)}, EMA144=${fmt(sig.b)}
     meme
   };
   writeStatusJSON(statusPayload);
-  writeLastTs(lastClosed.ts);
-
-  console.log('Pushed & updated status for closed candle:', lastClosed.ts);
-})().catch(e=>{
-  console.error('[FATAL]', e.stack || e.message || e);
-  process.exit(1);
-});
+  writeFile(STATE_FILE, lastClosed.ts);
+})();
