@@ -2,101 +2,114 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <link rel="manifest" href="manifest.json">
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ETH/USDT 15分钟监控</title>
+
   <style>
-    :root{--bg:#0b0f16;--card:#141b25;--muted:#a3b1c2;--good:#34d399;--bad:#f87171;--ink:#e6edf3;--accent:#22324a;}
+    :root{
+      --bg:#0b0f16; --card:#141b25; --ink:#dfe7f3; --muted:#8aa4bf;
+      --accent:#22c55e; --bad:#ff5c5c;
+    }
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"PingFang SC","Microsoft YaHei",sans-serif;}
-    a{color:#8ab4ff;text-decoration:none}
-    header{padding:18px 16px 8px;border-bottom:1px solid #1e2a3a;background:linear-gradient(180deg,#0b0f16,#0b0f1600)}
-    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-    .title{font-size:28px;font-weight:900;letter-spacing:1px}
-    .sub{opacity:.8;margin-left:8px}
-    button{background:var(--accent);color:var(--ink);border:1px solid #2a3b55;border-radius:10px;padding:10px 14px;font-weight:700}
-    button.alt{background:#22324a;}
-    button:active{transform:translateY(1px)}
-    .grid{display:grid;grid-template-columns:1fr;gap:14px;padding:16px;max-width:880px;margin:0 auto}
-    .card{background:var(--card);border:1px solid #22324a;border-radius:16px;padding:16px}
-    .small{color:var(--muted);font-size:12px}
-    .signal{font-size:18px;line-height:1.5}
-    .ok{color:var(--good)} .no{color:var(--bad)}
-    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;}
+    body{
+      margin:0; background:var(--bg); color:var(--ink);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans SC","PingFang SC",sans-serif;
+    }
+    a{color:#8ab4ff; text-decoration:none}
+    header{padding:18px 16px; border-bottom:1px solid #1f2937;}
+    .wrap{max-width:860px; margin:0 auto; padding:0 12px}
+    .title{font-size:28px; font-weight:900; letter-spacing:.5px}
+    .sub{opacity:.8; margin-left:8px; font-size:14px}
+    .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:6px 0}
     .row-end{margin-left:auto}
-    .chip{background:#1a2333;border:1px solid #24324a;color:#9fb3c8;padding:2px 8px;border-radius:999px;font-size:12px}
-    .footer{opacity:.7;text-align:center;padding:24px 16px}
+    .card{background:var(--card); border:1px solid #1f2937; border-radius:12px; padding:14px 16px; box-shadow:0 1px 6px rgba(0,0,0,.25)}
+    .ok{color:var(--accent); font-weight:700}
+    .no{color:var(--bad); font-weight:700}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .small{color:var(--muted); font-size:12px}
+    .footer{opacity:.7; text-align:center; padding:24px 16px}
   </style>
 </head>
 <body>
   <header>
-    <div class="row">
+    <div class="wrap row" style="justify-content:space-between;">
       <div class="title">ETH/USDT <span class="sub">15 分钟监控</span></div>
-      <div class="row-end chip">下一次刷新：<span id="nextAt">--:--</span></div>
-    </div>
-    <div class="row" style="margin-top:10px;">
-      <button id="btnNow">立即刷新</button>
-      <button id="btnNotify" class="alt">开启通知</button>
-      <span class="chip">倒计时：<span id="countdown">--:--</span></span>
+      <div class="row-end small">下一次拉取：<span id="nextAt">--:--</span></div>
     </div>
   </header>
 
-  <main class="grid">
-    <section class="card">
-      <div class="small">信号</div>
-      <div id="signal" class="signal mono">加载中…</div>
-    </section>
-
-    <section class="card">
-      <div class="small">当前价格</div>
-      <div id="price" class="mono">—</div>
-      <div class="small">H / L （15m K线）</div>
-      <div id="hl" class="mono">H: —  |  L: —</div>
-    </section>
-
-    <section class="card">
-      <div class="small">均线与距离</div>
-      <div id="dist" class="mono">—</div>
-    </section>
-
-    <section class="card">
-      <div class="small">斜率（近 10 根）</div>
-      <div id="slope" class="mono">—</div>
-    </section>
-
-    <!-- 新增：对冲 Meme 选择 -->
-    <section class="card">
-      <div class="small">对冲 Meme 选择</div>
-      <div id="hedge" class="mono">—</div>
-      <div class="small" style="margin-top:8px">说明：从 PEPE / DOGE / SHIB / FLOKI 中，选择 24h 成交额最高者作为对冲标的。</div>
-    </section>
-
-    <!-- 新增：风控建议 -->
-    <section class="card">
-      <div class="small">止盈 / 止损 建议</div>
-      <div id="risk" class="mono">
-ETH：止损 6% ，止盈 10%  
-Meme：止损 10% ，止盈 10%  
-移动规则：+8% 先移动保本；+15% 启用 2% 移动止盈
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="small">策略说明</div>
-      <div class="mono" style="white-space:pre-wrap">
-USE 触发条件需同时满足：
-1) 价格靠近均线：close 介于 EMA34 与 EMA144 之间，或
-   |close−EMA34|/close ≤ 0.5% 且 |close−EMA144|/close ≤ 0.5%
-2) 均线走势：|EMA34_now−EMA34_10bars_ago|/EMA34_now ≤ 0.3%，且
-   |EMA144_now−EMA144_10bars_ago|/EMA144_now ≤ 0.2%
-
-满足则输出「可开双向」，否则「暂不建议」。
-      </div>
-    </section>
+  <main class="wrap" style="margin-top:10px;">
+    <div id="panel" class="card">加载中…</div>
+    <div class="small" style="margin-top:10px;">
+      说明：云端脚本每分钟检查；只在<strong>新收盘K线</strong>出现时计算；只在<strong>状态变化</strong>（可开⇄不可开）时推送到 ntfy。
+    </div>
   </main>
 
-  <div class="footer small">数据源：OKX 公共 API（经 AllOrigins 代理） · 本工具仅作信息展示 · 不构成投资建议</div>
+  <div class="footer small">© ETH15m Monitor</div>
 
-  <script src="./script.js"></script>
+  <script>
+    function fmtNum(v, n=2){
+      const x = Number(v);
+      return Number.isFinite(x) ? x.toFixed(n) : '-';
+    }
+
+    async function render(){
+      try{
+        const res = await fetch('./status.json?ts=' + Date.now(), { cache:'no-store' });
+        if(!res.ok) throw new Error('status.json not found yet');
+        const s = await res.json();
+
+        const ok = !!s.use;
+        const title = ok ? '✅ 可开双向' : '❌ 暂不建议';
+
+        const html = `
+          <div class="row">
+            <strong class="${ok ? 'ok':'no'}">${title}</strong>
+            <span>｜${s.direction || '-'}</span>
+            <span class="row-end small">最近检测：<span class="mono">${s.last_check_iso || '-'}</span></span>
+          </div>
+
+          <div class="row mono">
+            收盘(UTC)：<span>${s.last_candle_iso || '-'}</span>
+          </div>
+
+          <div class="row mono">
+            当前价=${fmtNum(s.close)}，
+            EMA34=${fmtNum(s.ema34)}，
+            EMA144=${fmtNum(s.ema144)}
+          </div>
+
+          <div class="row mono">均线距离：${fmtNum(s.d34,4)}% / ${fmtNum(s.d144,4)}%</div>
+          <div class="row mono">斜率(10根)：${fmtNum(s.s34,4)}% / ${fmtNum(s.s144,4)}%</div>
+
+          <div class="row">对冲 Meme 选择：<strong>${s.meme || '-'}</strong></div>
+
+          <div class="row small">
+            规则：ETH止损6%/止盈10%；Meme止损10%/止盈10%；+8%保本，+15%启用2%移动止盈
+          </div>
+        `;
+        document.getElementById('panel').innerHTML = html;
+      }catch(e){
+        document.getElementById('panel').innerHTML = '等待生成第一次状态…';
+      }
+    }
+
+    function tickCountdown(ms){
+      const el = document.getElementById('nextAt');
+      let left = Math.floor(ms/1000);
+      const t = setInterval(()=>{
+        if(left <= 0){ el.textContent = '正在刷新…'; clearInterval(t); return; }
+        const m = String(Math.floor(left/60)).padStart(2,'0');
+        const s = String(left%60).padStart(2,'0');
+        el.textContent = `${m}:${s}`;
+        left--;
+      }, 1000);
+    }
+
+    // 先渲染一次，然后每 30 秒拉取一次
+    render();
+    tickCountdown(30000);
+    setInterval(()=>{ render(); tickCountdown(30000); }, 30000);
+  </script>
 </body>
 </html>
