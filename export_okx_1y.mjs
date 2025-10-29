@@ -1,129 +1,159 @@
 // export_okx_1y.mjs
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+// 拉取 OKX ETH-USDT 15m 最近 365 天历史K线，自动分页、防死循环、去重，支持 Cloudflare Worker 代理。
+// 产出：项目根目录 okx_eth_15m.csv
 
-/* ===== 配置 ===== */
-const PROXY_BASE = "https://eth-proxy.1053363050.workers.dev"; // 你的 Worker
-const INST_ID = "ETH-USDT";
+import fs from "fs/promises";
+
+const SYMBOL = "ETH-USDT";
 const BAR = "15m";
 const DAYS = 365;
-const PAGE_LIMIT = 300;                 // OKX 允许到 300，页数更少
 const OUT_CSV = "okx_eth_15m.csv";
-const FORCE_PROXY_FIRST = true;         // 直接走 Worker，减少直连空页
-/* ================= */
 
-const nowMs = Date.now();
-const cutoffMs = nowMs - DAYS * 24 * 60 * 60 * 1000;
-const UA = "Mozilla/5.0 Chrome/124 Safari/537.36";
+// ====== 你的代理（可换成直连）======
+const PROXY = "https://eth-proxy.1053363050.workers.dev/"; // 末尾带 /
+// ====================================
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const looksNonJson = (s) => !s || s.trim().startsWith("<") || s.toLowerCase().includes("<html");
+const DIRECT = "https://www.okx.com";
+const BASE = PROXY || DIRECT;
 
-const okxUrl = ({ history, cursor }) => {
-  const base = history
-    ? "https://www.okx.com/api/v5/market/history-candles"
-    : "https://www.okx.com/api/v5/market/candles";
-  const p = new URLSearchParams({ instId: INST_ID, bar: BAR, limit: String(PAGE_LIMIT) });
-  if (history && cursor) p.set("before", String(cursor));
-  return `${base}?${p.toString()}`;
-};
+const START_TS = Date.now() - DAYS * 24 * 60 * 60 * 1000; // 起点：365天前
+const LIMIT = 300;            // OKX 单页最大 300
+const MAX_PAGES = 2000;       // 双保险：最多翻 2000 页（按常识一年 15m ~ 35k 根，约 117 页）
+const SLEEP_MS = 180;         // 分页小延时，降低风控概率
+const RETRY = 5;
 
-async function fetchText(url) {
-  const resp = await fetch(url, { headers: { accept: "application/json", "user-agent": UA } });
-  return await resp.text();
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function getPage({ history, cursor }) {
-  const direct = okxUrl({ history, cursor });
-  const proxy = `${PROXY_BASE}/?url=${encodeURIComponent(direct)}`;
-  const routes = FORCE_PROXY_FIRST ? [proxy, direct] : [direct, proxy];
+async function httpGetJson(url) {
+  for (let i = 1; i <= RETRY; i++) {
+    try {
+      const resp = await fetch(url, { headers: { "User-Agent": "eth1-exporter" } });
+      const text = await resp.text();
 
-  for (const route of routes) {
-    for (let i = 1; i <= 3; i++) {
-      try {
-        const txt = await fetchText(route);
-        if (looksNonJson(txt)) throw new Error(`non-json: ${txt.slice(0,80)}`);
-        const j = JSON.parse(txt);
-        if (j?.code !== "0" || !Array.isArray(j?.data)) throw new Error(`bad payload: ${txt.slice(0,100)}`);
-        return { arr: j.data, route, sample: txt.slice(0,120) };
-      } catch (e) {
-        await sleep(250 * i);
-      }
+      // 代理可能返回 HTML，直接挡掉
+      if (text.startsWith("<")) throw new Error("HTML returned");
+
+      const j = JSON.parse(text);
+      if (j.code !== "0") throw new Error(`API code=${j.code}, msg=${j.msg}`);
+      return j;
+    } catch (e) {
+      if (i === RETRY) throw e;
+      await sleep(400 * i);
     }
   }
-  return { arr: [], route: "all_failed", sample: "" };
 }
 
-async function collectAll() {
-  const bucket = [];
+function buildUrl(beforeTs) {
+  // OKX history-candles 文档：before/after 为毫秒时间戳
+  // 这里用 before=上一页最早一根的ts-1，向更早翻页
+  const u = new URL("/api/v5/market/history-candles", BASE);
+  u.searchParams.set("instId", SYMBOL);
+  u.searchParams.set("bar", BAR);
+  u.searchParams.set("limit", String(LIMIT));
+  if (beforeTs) u.searchParams.set("before", String(beforeTs));
+  return u.toString();
+}
 
-  // 第1页：最新
-  {
-    const { arr, route, sample } = await getPage({ history: false, cursor: undefined });
-    console.log(`page 1 via /candles -> ${arr.length} rows, route=${route}`);
-    if (!arr?.length) {
-      console.log("Empty first page sample:", sample);
-      return [];
-    }
-    bucket.push(...arr);
-  }
+function normalizeRow(arr) {
+  // OKX 返回：[ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+  const [ts, open, high, low, close, vol] = arr;
+  return {
+    ts: Number(ts),
+    iso: new Date(Number(ts)).toISOString(),
+    open: Number(open),
+    high: Number(high),
+    low: Number(low),
+    close: Number(close),
+    vol: Number(vol)
+  };
+}
 
-  // 往前翻页：history-candles（游标 = 最老 ts - 1）
-  let page = 1;
-  while (true) {
-    const last = bucket[bucket.length - 1];
-    const oldestTs = Number(last?.[0]);
-    if (!Number.isFinite(oldestTs) || oldestTs <= cutoffMs) break;
+function toCsv(rows) {
+  const header = "ts,iso,open,high,low,close,vol";
+  const body = rows.map(r =>
+    [r.ts, r.iso, r.open, r.high, r.low, r.close, r.vol].join(",")
+  );
+  return [header, ...body].join("\n");
+}
 
-    const cursor = oldestTs - 1; // 关键：减1，避免重复导致空页
+async function main() {
+  console.log(`Fetching ${SYMBOL} ${BAR} for last ${DAYS} days...`);
+  if (PROXY) console.log(`Proxy: ${PROXY}`);
+
+  let before = undefined;
+  let page = 0;
+  let all = [];
+  const seen = new Set();
+  let lastMinTs = Infinity;
+
+  while (page < MAX_PAGES) {
     page++;
+    const url = buildUrl(before);
+    console.log(`page ${page} -> ${url}`);
 
-    const { arr, route, sample } = await getPage({ history: true, cursor });
-    console.log(`page ${page} via /history -> ${arr.length} rows, route=${route}, cursor=${cursor}`);
-    if (!arr?.length) {
-      console.log("Empty page sample:", sample);
+    const j = await httpGetJson(url);
+    const data = j.data || [];
+    if (data.length === 0) {
+      console.log("empty page, break.");
       break;
     }
-    bucket.push(...arr);
 
-    if (page > 5000) break; // 保险
-    await sleep(120);
+    // OKX 返回通常是按时间降序（最新在前），保险起见都放进来后再整体排序去重
+    let batch = data.map(normalizeRow);
+
+    // 去重
+    const fresh = [];
+    for (const r of batch) {
+      if (!seen.has(r.ts)) {
+        seen.add(r.ts);
+        fresh.push(r);
+      }
+    }
+    all.push(...fresh);
+
+    // 更新游标：取这一页中**最早**的一根K线时间戳
+    const minTs = Math.min(...batch.map(r => r.ts));
+
+    // 防止游标不动导致死循环
+    if (minTs >= lastMinTs) {
+      console.log(`cursor not moving (minTs=${minTs}) → break`);
+      break;
+    }
+    lastMinTs = minTs;
+
+    // 如果已经翻到目标区间之前，就可以停止
+    if (minTs <= START_TS) {
+      console.log(`reached start (${new Date(START_TS).toISOString()})`);
+      break;
+    }
+
+    // 下一页 before=这一页最早K线时间戳 - 1
+    before = minTs - 1;
+
+    await sleep(SLEEP_MS);
   }
 
-  // 去重+升序+截断
-  const map = new Map();
-  for (const r of bucket) {
-    const ts = Number(r[0]);
-    if (Number.isFinite(ts)) map.set(ts, r);
+  if (all.length === 0) {
+    throw new Error("No rows fetched.");
   }
-  const rows = Array.from(map.values()).sort((a,b)=>Number(a[0])-Number(b[0]));
-  return rows.filter(r => Number(r[0]) >= cutoffMs);
+
+  // 过滤出最近 365 天
+  all = all
+    .filter(r => r.ts >= START_TS)
+    .sort((a, b) => a.ts - b.ts); // 最终升序
+
+  console.log(`rows within ${DAYS}d: ${all.length}`);
+  if (all.length < 100) {
+    throw new Error("rows < 100, 疑似抓取异常/被风控");
+  }
+
+  // 写 CSV
+  const csv = toCsv(all);
+  await fs.writeFile(OUT_CSV, csv, "utf8");
+  console.log(`written: ${OUT_CSV}, size=${csv.length} chars`);
 }
 
-function writeCsv(rows) {
-  const header = "ts,iso,open,high,low,close,vol";
-  const lines = [header];
-  for (const r of rows) {
-    const ts = Number(r[0]);
-    const iso = new Date(ts).toISOString();
-    const [, open, high, low, close, vol] = r;
-    lines.push([ts, iso, open, high, low, close, vol].join(","));
-  }
-  const content = lines.join("\n") + "\n";
-
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-  const out = path.join(__dirname, OUT_CSV);
-  fs.writeFileSync(out, content, "utf8");
-  return out;
-}
-
-(async () => {
-  console.log(`Fetching ${INST_ID} ${BAR} for last ${DAYS} days... (proxy-first)`);
-  const rows = await collectAll();
-  console.log(`Rows within ${DAYS}d: ${rows.length}`);
-  if (rows.length < 1000) throw new Error("rows 太少，仍未翻页成功（看上面的每页日志）。");
-  const out = writeCsv(rows);
-  console.log("CSV written:", out);
-})().catch(e => { console.error("Error:", e?.message || e); process.exit(1); });
+main().catch(err => {
+  console.error("FATAL:", err.message || err);
+  process.exit(1);
+});
