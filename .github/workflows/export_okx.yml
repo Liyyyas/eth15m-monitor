@@ -6,8 +6,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +23,6 @@ jobs:
         run: |
           git config user.name "actions-user"
           git config user.email "actions@github"
-          git add eth15m-monitor/okx_eth_15m.csv
+          git add okx_eth_15m.csv
           git commit -m "update: OKX ETH 15m CSV (1y)" || echo "nothing to commit"
           git push
