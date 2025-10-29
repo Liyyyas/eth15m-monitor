@@ -27,7 +27,7 @@ jobs:
       - name: Run exporter
         run: |
           node -v
-          node export_okx_ly.mjs
+          node export_okx_1y.mjs
 
       - name: Commit CSV (safe rebase & retry)
         env:
@@ -37,8 +37,10 @@ jobs:
           git config user.name  "actions-user"
           git config user.email "actions@github"
 
+          # 只把目标文件加入暂存
           git add eth15m-monitor/okx_eth_15m.csv || true
 
+          # 若没有变更就直接退出
           if git diff --cached --quiet; then
             echo "No CSV changes to commit."
             exit 0
@@ -46,6 +48,7 @@ jobs:
 
           git commit -m "update: OKX ETH 15m CSV (1y)" || true
 
+          # 先拉取并rebase，避免 'fetch first'
           for i in 1 2 3 4 5; do
             git pull --rebase origin "$BRANCH" || true
             git push origin HEAD:"$BRANCH" && break
