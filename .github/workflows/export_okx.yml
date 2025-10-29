@@ -1,28 +1,28 @@
 name: Export OKX ETH 15m CSV
 
 on:
-  workflow_dispatch: {}         # 手动运行
-  # 如要每天跑一次，取消下面注释（UTC 时间）
-  # schedule:
-  #   - cron: "5 1 * * *"
+  workflow_dispatch: {}   # 手动触发
 
 jobs:
-  run:
+  export:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # 允许提交文件
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Export last 1y 15m candles to CSV
+      - name: Run exporter
         run: node export_okx_15m_to_csv.js
 
-      - name: Commit CSV if changed
+      - name: Commit CSV (if changed)
         run: |
-          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add okx_eth_15m.csv
-          git diff --cached --quiet || git commit -m "data: update 1y ETH/USDT 15m CSV"
+          git commit -m "update: OKX ETH/USDT 15m CSV (1y)" || echo "no changes"
           git push
