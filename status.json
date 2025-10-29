@@ -1,7 +1,8 @@
 {
   "ok": false,
-  "direction": "ETH",
-  "close": 0,
+  "direction": "-",
+  "last_candle_iso": "1970-01-01T00:00:00Z",
+  "price": 0,
   "ema34": 0,
   "ema144": 0,
   "dist34": 0,
@@ -9,7 +10,6 @@
   "slope34": 0,
   "slope144": 0,
   "meme": "-",
-  "last_candle_iso": "1970-01-01T00:00:00Z",
   "last_check_iso": "1970-01-01T00:00:00Z",
-  "last_signal": null
+  "last_signal": "no"
 }
