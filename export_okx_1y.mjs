@@ -1,40 +1,46 @@
 // export_okx_1y.mjs
-// 拉取 ETH/USDT 15m 最近 365 天K线；优先直连 OKX，必要时回退到你的 Worker。
-// 输出 okx_eth_15m.csv。Node 20+ (ESM)。
+// 目标：抓取 ETH/USDT 15m 最近 365 天K线；第1页走 /market/candles，往前翻用 /market/history-candles
+// 若直连空/异常则自动切到 Cloudflare Worker。
+// 产物：okx_eth_15m.csv（ts, iso, open, high, low, close, vol）
+// 运行环境：Node 20+（ESM）
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/* ===== 配置 ===== */
-const PROXY_BASE = "https://eth-proxy.1053363050.workers.dev";
+/* ===== 你的配置 ===== */
+const PROXY_BASE = "https://eth-proxy.1053363050.workers.dev"; // 你的 Worker
 const INST_ID = "ETH-USDT";
 const BAR = "15m";
 const DAYS = 365;
-const PAGE_LIMIT = 100; // 保守，用 100，稳定一些
+const PAGE_LIMIT = 100;             // 建议 100，稳
 const OUT_CSV = "okx_eth_15m.csv";
-/* =============== */
+/* ==================== */
 
 const nowMs = Date.now();
 const cutoffMs = nowMs - DAYS * 24 * 60 * 60 * 1000;
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-const okxHistUrl = (before) =>
-  "https://www.okx.com/api/v5/market/history-candles?" +
-  new URLSearchParams({
-    instId: INST_ID,
-    bar: BAR,
-    before: String(before),
-    limit: String(PAGE_LIMIT),
-  }).toString();
-
 const UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 生成 OKX URL */
+const okxUrl = ({ history, before }) => {
+  const base = history
+    ? "https://www.okx.com/api/v5/market/history-candles"
+    : "https://www.okx.com/api/v5/market/candles";
+  const p = new URLSearchParams({
+    instId: INST_ID,
+    bar: BAR,
+    limit: String(PAGE_LIMIT),
+  });
+  if (history && before) p.set("before", String(before));
+  return `${base}?${p.toString()}`;
+};
+
 const looksNonJson = (s) => {
   if (!s) return true;
-  const t = s.trim().slice(0, 64).toLowerCase();
+  const t = s.trim().slice(0, 80).toLowerCase();
   return t.startsWith("<") || t.startsWith("okx proxy") || t.includes("<html");
 };
 
@@ -48,63 +54,66 @@ async function fetchText(url) {
   return await resp.text();
 }
 
-async function getPage(before) {
-  const directUrl = okxHistUrl(before);
-  const proxyUrl = `${PROXY_BASE}/?url=${encodeURIComponent(directUrl)}`;
+/** 拉一页（先直连，再 Worker 回退） */
+async function getPage({ history, before }) {
+  const direct = okxUrl({ history, before });
+  const proxy = `${PROXY_BASE}/?url=${encodeURIComponent(direct)}`;
 
-  // 1) 直连优先
-  for (const route of [directUrl, proxyUrl]) {
+  for (const route of [direct, proxy]) {
     for (let i = 1; i <= 4; i++) {
       try {
         const txt = await fetchText(route);
-
         if (looksNonJson(txt)) throw new Error(`non-json: ${txt.slice(0, 120)}`);
-
         const data = JSON.parse(txt);
         if (data?.code !== "0" || !Array.isArray(data?.data)) {
           throw new Error(`bad payload: ${txt.slice(0, 120)}`);
         }
-        return { arr: data.data, rawSample: txt.slice(0, 120), route };
+        return { arr: data.data, route, sample: txt.slice(0, 120) };
       } catch (e) {
-        await sleep(350 * i);
-        if (i === 4) {
-          // 切换到下条线路
-          break;
-        }
+        await sleep(300 * i);
+        if (i === 4) break; // 切换线路
       }
     }
   }
   throw new Error("all routes failed");
 }
 
-async function collect() {
+async function collectAll() {
   const bucket = [];
-  let before = nowMs;
-  let pageNo = 0;
 
+  // 第 1 页：最新
+  {
+    const { arr, route, sample } = await getPage({ history: false, before: undefined });
+    if (!arr || arr.length === 0) {
+      console.log(`Empty first page from /market/candles. route=${route}\nsample=${sample}`);
+      return [];
+    }
+    bucket.push(...arr);
+  }
+
+  // 往前翻页：history-candles
+  let page = 1;
   while (true) {
-    pageNo++;
-    const { arr, rawSample, route } = await getPage(before);
+    const last = bucket[bucket.length - 1];
+    const oldestTs = Number(last?.[0]); // ts 在 index 0
+    if (!Number.isFinite(oldestTs)) break;
+    if (oldestTs <= cutoffMs) break;
 
+    page++;
+    const { arr, route, sample } = await getPage({ history: true, before: oldestTs });
     if (!arr || arr.length === 0) {
       console.log(
-        `Empty page. route=${route}\nsample=${rawSample ?? "(empty)"}`
+        `Empty page. route=${route}\nsample=${sample ?? "(empty)"}`
       );
       break;
     }
-
     bucket.push(...arr);
 
-    const oldestTs = Number(arr[arr.length - 1][0]);
-    if (!Number.isFinite(oldestTs)) break;
-    before = oldestTs;
-
-    if (oldestTs <= cutoffMs) break;
-    if (pageNo > 1200) break; // 保险
-    await sleep(120); // 轻微节流
+    if (page > 2000) break; // 保险
+    await sleep(120);
   }
 
-  // 去重+升序
+  // 去重 + 升序 + 截到 cutoff
   const map = new Map();
   for (const r of bucket) {
     const ts = Number(r[0]);
@@ -120,7 +129,7 @@ function writeCsv(rows) {
   for (const r of rows) {
     const ts = Number(r[0]);
     const iso = new Date(ts).toISOString();
-    const [ , open, high, low, close, vol ] = r;
+    const [, open, high, low, close, vol] = r;
     lines.push([ts, iso, open, high, low, close, vol].join(","));
   }
   const content = lines.join("\n") + "\n";
@@ -133,8 +142,8 @@ function writeCsv(rows) {
 }
 
 (async () => {
-  console.log(`Fetching ${INST_ID} ${BAR} for last ${DAYS} days... (direct first)`);
-  const rows = await collect();
+  console.log(`Fetching ${INST_ID} ${BAR} for last ${DAYS} days... (/market/candles → /market/history-candles)`);
+  const rows = await collectAll();
   console.log(`Rows within ${DAYS}d: ${rows.length}`);
   if (rows.length < 10) {
     throw new Error("rows < 10，疑似仍为空页/风控；上面日志已输出 sample。");
