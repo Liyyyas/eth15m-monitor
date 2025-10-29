@@ -1,168 +1,227 @@
-// monitor_15m_close.js
-// 云端每分钟跑：仅在“出现新收盘的15m K线”时计算；只在状态变化时推送到 ntfy；
-// 并把状态写入 status.json，供网页展示“最近检测”。
+// ETH 15m close monitor (OKX) → status.json + ntfy
+// Node 20+, no deps
 
 const fs = require('fs');
-const path = require('path');
 
-const NTFY_SERVER = process.env.NTFY_SERVER || 'https://ntfy.sh';
-const NTFY_TOPIC  = process.env.NTFY_TOPIC || '';      // 为空则不推送
+const NTFY_SERVER = (process.env.NTFY_SERVER || 'https://ntfy.sh').replace(/\/+$/, '');
+const NTFY_TOPIC  = process.env.NTFY_TOPIC || 'ETH15_DUI';
+const TARGET_URL  = process.env.TARGET_URL || 'https://example.com/';
 
-const INST_ID = 'ETH-USDT';
-const BAR = '15m';
-const STATE_DIR = path.join(process.cwd(), '.state');
-const STATE_FILE = path.join(STATE_DIR, 'last_ts.txt');
-const HASH_FILE = path.join(STATE_DIR, 'last_hash.txt'); // 新增: 记录上一次信号状态
-const STATUS_JSON = path.join(process.cwd(), 'status.json');
+const STATUS_FILE = 'status.json';
 
-const pct = (a,b)=> (a-b)/b*100;
-const fmt = (n,d=2)=> Number(n).toFixed(d);
+// ---- Utils ----
+const sleep = (ms)=> new Promise(r=>setTimeout(r,ms));
 
-function ema(vals, p){
-  if (vals.length < p) return [];
-  const k = 2/(p+1);
-  const out = [];
-  const sma = vals.slice(0,p).reduce((a,b)=>a+b,0)/p;
-  out[p-1]=sma;
-  for (let i=p;i<vals.length;i++) out[i] = vals[i]*k + out[i-1]*(1-k);
+function ema(values, period) {
+  // returns full EMA series (same length)
+  if (values.length === 0) return [];
+  const k = 2 / (period + 1);
+  const out = new Array(values.length);
+  // seed with SMA
+  let sum = 0;
+  for (let i = 0; i < period && i < values.length; i++) sum += values[i];
+  out[period - 1] = sum / period;
+  for (let i = period; i < values.length; i++) {
+    out[i] = values[i] * k + out[i - 1] * (1 - k);
+  }
+  // fill head with first known
+  for (let i = 0; i < period - 1 && i < values.length; i++) out[i] = out[period - 1];
   return out;
 }
 
-async function okxJSON(url){
-  const r = await fetch(url, { headers: { 'cache-control':'no-cache' }});
-  const j = await r.json();
-  if (!j || j.code !== '0') throw new Error('OKX API error: '+JSON.stringify(j));
-  return j.data;
+function pct(a, b) {
+  return b === 0 ? 0 : (a - b) / b; // as fraction
 }
 
-async function getCandles(instId=INST_ID, bar=BAR, limit=210){
-  const url = `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
-  const data = await okxJSON(url);
-  // OKX candles 是倒序，这里翻为正序
-  return data.map(x=>({
-    ts:+x[0], open:+x[1], high:+x[2], low:+x[3], close:+x[4]
-  })).reverse();
+function toISO(tsMs) {
+  return new Date(tsMs).toISOString();
 }
 
-async function pickMeme(){
-  const candidates = ['PEPE-USDT','DOGE-USDT','SHIB-USDT','FLOKI-USDT'];
-  const tickers = await okxJSON('https://www.okx.com/api/v5/market/tickers?instType=SPOT');
-  let best = null;
-  for (const sym of candidates){
-    const row = tickers.find(x=>x.instId===sym);
-    if (!row) continue;
-    const vol = parseFloat(row.volCcyQuote || row.volCcy || row.vol || '0');
-    if (!best || vol > best.vol) best = { sym: sym.split('-')[0], vol };
+async function fetchOkxKlines() {
+  // 200 根 15m K
+  const url = 'https://www.okx.com/api/v5/market/candles?instId=ETH-USDT-SWAP&bar=15m&limit=200';
+  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  if (!res.ok) throw new Error(`OKX ${res.status} ${res.statusText}`);
+  const json = await res.json();
+  if (!json.data || !Array.isArray(json.data) || json.data.length === 0) {
+    throw new Error('OKX no data');
   }
-  return best?.sym || 'PEPE';
+  // OKX 返回时间倒序： [ [ts, o,h,l,c,vol,...], ... ]
+  const rows = json.data.map(r => ({
+    ts: Number(r[0]),
+    open: Number(r[1]),
+    high: Number(r[2]),
+    low:  Number(r[3]),
+    close:Number(r[4])
+  })).sort((a,b)=> a.ts - b.ts); // 升序
+  return rows;
 }
 
-function computeSignal(closes){
-  if (closes.length < 160) return { ready:false };
-  const e34 = ema(closes,34);
-  const e144= ema(closes,144);
-  const i = closes.length - 1;
+function decideSignal(rows) {
+  const closes = rows.map(r => r.close);
+  const ema34 = ema(closes, 34);
+  const ema144 = ema(closes, 144);
 
-  const c = closes[i];
-  const a = e34[i];
-  const b = e144[i];
+  const last = rows[rows.length - 1];
+  const prev = rows[rows.length - 2];
 
-  const d34 = pct(c,a);
-  const d144= pct(c,b);
-  const s34 = pct(e34[i], e34[i-10]);
-  const s144= pct(e144[i], e144[i-10]);
+  const c = last.close;
+  const e34 = ema34[ema34.length - 1];
+  const e144 = ema144[ema144.length - 1];
 
-  const near = Math.abs(d34)<=0.5 && Math.abs(d144)<=0.5;
-  const flat = Math.abs(s34)<=0.3 && Math.abs(s144)<=0.2;
-  const use  = near && flat;
-  const direction = a>=b ? 'ETH 多' : 'ETH 空';
+  const e34_10 = ema34[ema34.length - 11];
+  const e144_10 = ema144[ema144.length - 11];
 
-  return { ready:true, use, direction, c,a,b, d34,d144, s34,s144 };
+  const dist34 = pct(c, e34);
+  const dist144 = pct(c, e144);
+
+  const slope34 = pct(e34, e34_10);     // 10 根内 EMA%变化
+  const slope144 = pct(e144, e144_10);
+
+  const between = (c >= Math.min(e34, e144) && c <= Math.max(e34, e144));
+  const nearAny = Math.min(Math.abs(dist34), Math.abs(dist144)) <= 0.005; // <=0.5%
+  const flat = Math.abs(slope34) <= 0.003 && Math.abs(slope144) <= 0.002; // 0.3% / 0.2%
+
+  const ok = (between || nearAny) && flat;
+
+  const direction = e34 >= e144 ? 'ETH 向上' : 'ETH 向下';
+
+  return {
+    ok,
+    direction,
+    last_candle_iso: toISO(last.ts),
+    price: c,
+    ema34: e34,
+    ema144: e144,
+    dist34,
+    dist144,
+    slope34,
+    slope144
+  };
 }
 
-async function pushNtfy(title, body){
-  if (!NTFY_TOPIC) return;
-  const url = `${NTFY_SERVER.replace(/\/+$/,'')}/${encodeURIComponent(NTFY_TOPIC)}`;
-  const r = await fetch(url, {
-    method:'POST',
-    headers:{
-      'Title': title,
-      'Tags': title.includes('✅') ? 'white_check_mark,rocket' : 'x',
-      'Content-Type':'text/plain; charset=utf-8'
+function readStatus() {
+  try {
+    const t = fs.readFileSync(STATUS_FILE, 'utf8');
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+}
+
+function writeStatus(obj) {
+  fs.writeFileSync(STATUS_FILE, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+async function pushNtfy(payload) {
+  // 头部必须 ASCII；中文放 body
+  const titleAscii = payload.ok ? 'OPEN BOTH' : 'NO ENTRY';
+  const tagsAscii  = payload.ok ? 'white_check_mark' : 'x';
+
+  const body =
+`信号：${payload.ok ? '✅ 可开双向' : '❌ 暂不建议'}
+方向：${payload.direction}
+收盘(UTC)：${payload.last_candle_iso}
+当前价=${payload.price.toFixed(2)}，EMA34=${payload.ema34.toFixed(2)}，EMA144=${payload.ema144.toFixed(2)}
+均线距离：${(payload.dist34 * 100).toFixed(3)}% / ${(payload.dist144 * 100).toFixed(3)}%
+斜率(10根)：${(payload.slope34 * 100).toFixed(3)}% / ${(payload.slope144 * 100).toFixed(3)}%
+对冲 Meme：${payload.meme || '-'}
+规则：ETH止损6%/止盈10%；Meme止损10%/止盈10%；+8%保本，+15%启用2%移动止盈。
+查看：${TARGET_URL}`;
+
+  const res = await fetch(`${NTFY_SERVER}/${encodeURIComponent(NTFY_TOPIC)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'X-Title': titleAscii,
+      'X-Tags': tagsAscii,
+      'X-Priority': '4'
     },
     body
   });
-  if (!r.ok) throw new Error(`ntfy push failed: ${r.status} ${r.statusText}`);
+  if (!res.ok) {
+    const t = await res.text().catch(()=>'');
+    throw new Error(`ntfy push failed: ${res.status} ${res.statusText} ${t}`);
+  }
 }
 
-function ensureDir(p){ if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive:true }); }
-function readFileNum(f){ try{ return Number(fs.readFileSync(f,'utf8').trim()) || 0; }catch{ return 0; } }
-function readFileStr(f){ try{ return fs.readFileSync(f,'utf8').trim(); }catch{ return ''; } }
-function writeFile(f, content){ ensureDir(path.dirname(f)); fs.writeFileSync(f, String(content)); }
-function writeStatusJSON(payload){ fs.writeFileSync(STATUS_JSON, JSON.stringify(payload, null, 2)); }
+function getMemeChoice() {
+  // 这里先占位（固定列表，未来你要接交易所 API 可再扩展）
+  // 简单策略：按固定优先顺序选择
+  const list = ['PEPE', 'DOGE', 'SHIB', 'FLOKI'];
+  return list[0];
+}
 
-(async ()=>{
-  const candles = await getCandles();
-  if (candles.length < 2) return console.log('Not enough candles');
+async function main() {
+  // 1) 拉数
+  const rows = await fetchOkxKlines();
 
-  const lastClosed = candles[candles.length-2];
-  const lastTs = readFileNum(STATE_FILE);
-  const lastHash = readFileStr(HASH_FILE);
-  const nowIso = new Date().toISOString();
+  // 2) 只在 15m 收盘之后的 1 分钟内触发：判断 now 距离 last.ts
+  const now = Date.now();
+  const lastTs = rows[rows.length - 1].ts;
+  const sinceMs = now - lastTs;
+  const fifteenMin = 15 * 60 * 1000;
 
-  // 若没新收盘K线，仅更新时间戳
-  if (lastClosed.ts === lastTs){
-    let prev = {};
-    try { prev = JSON.parse(fs.readFileSync(STATUS_JSON,'utf8')); } catch {}
-    prev.last_check_iso = nowIso;
-    writeStatusJSON(prev);
-    console.log('Same closed candle → update last_check only.');
-    return;
+  // 若最新 K 线还在进行中（即距离上根收盘 < 15min），不推送，但仍更新“最近检测时间”
+  // 为了只在收盘后 1 分钟窗口内发，做一个窗口限制（<= 70 秒），避免重复。
+  let canNotify = false;
+  if (sinceMs >= 0 && sinceMs <= 70 * 1000) {
+    canNotify = true;
   }
 
-  // 新收盘：计算
-  const closes = candles.map(c=>c.close);
-  const idx = candles.length - 2;
-  const sig = computeSignal(closes.slice(0, idx+1));
-  if (!sig.ready) return console.log('EMA not ready');
+  // 3) 计算信号
+  const s = decideSignal(rows);
+  s.meme = getMemeChoice();
 
-  const meme = await pickMeme();
-  const candleIso = new Date(lastClosed.ts).toISOString();
-  const title = sig.use ? '✅ 可开双向' : '❌ 暂不建议';
-  const body =
-`${title} ｜ ${sig.direction} ｜ 对冲：${meme}
-收盘时间(UTC)：${candleIso}
-close=${fmt(sig.c)}, EMA34=${fmt(sig.a)}, EMA144=${fmt(sig.b)}
-距离：${fmt(sig.d34)}% / ${fmt(sig.d144)}% · 斜率10：${fmt(sig.s34)}% / ${fmt(sig.s144)}%
-规则：ETH止损6%/止盈10%；Meme止损10%/止盈10%；+8%保本，+15%启用2%移动止盈
-最近检测：${nowIso}`;
+  // 4) 读取旧状态，判断是否“状态变化”
+  const old = readStatus();
+  const prevSignal = old ? (old.ok ? 'ok' : 'no') : 'none';
+  const currSignal = s.ok ? 'ok' : 'no';
+  const changed = prevSignal !== currSignal;
 
-  // 状态哈希（仅在状态变化时推送）
-  const newHash = `${sig.use?'1':'0'}|${sig.direction}|${meme}`;
-  if (newHash !== lastHash){
-    await pushNtfy(title, body);
-    writeFile(HASH_FILE, newHash);
-    console.log('🔔 状态变化 → 已推送');
-  } else {
-    console.log('无状态变化 → 不推送');
-  }
-
-  // 写 status.json（供网页展示）
-  const statusPayload = {
-    last_candle_ts: lastClosed.ts,
-    last_candle_iso: candleIso,
-    last_check_iso: nowIso,
-    use: sig.use,
-    direction: sig.direction,
-    close: +fmt(sig.c,2),
-    ema34: +fmt(sig.a,2),
-    ema144:+fmt(sig.b,2),
-    d34: +fmt(sig.d34,4),
-    d144:+fmt(sig.d144,4),
-    s34: +fmt(sig.s34,4),
-    s144:+fmt(sig.s144,4),
-    meme
+  // 5) 准备写入 status.json
+  const out = {
+    ok: s.ok,
+    direction: s.direction,
+    last_candle_iso: s.last_candle_iso,
+    price: s.price,
+    ema34: s.ema34,
+    ema144: s.ema144,
+    dist34: s.dist34,
+    dist144: s.dist144,
+    slope34: s.slope34,
+    slope144: s.slope144,
+    meme: s.meme,
+    last_check_iso: toISO(Date.now()),
+    last_signal: currSignal
   };
-  writeStatusJSON(statusPayload);
-  writeFile(STATE_FILE, lastClosed.ts);
-})();
+  writeStatus(out);
+
+  // 6) 仅当 (状态变化 && 确认是收盘后窗口内) 才推送
+  if (changed && canNotify) {
+    await pushNtfy(out);
+  }
+}
+
+main().catch(async (err) => {
+  console.error(err);
+  // 出错也尽量写入一个可读状态，方便页面提示
+  const fallback = {
+    ok: false,
+    direction: '-',
+    last_candle_iso: '1970-01-01T00:00:00Z',
+    price: 0,
+    ema34: 0,
+    ema144: 0,
+    dist34: 0,
+    dist144: 0,
+    slope34: 0,
+    slope144: 0,
+    meme: '-',
+    last_check_iso: toISO(Date.now()),
+    last_signal: 'no',
+    error: String(err && err.message || err)
+  };
+  try { writeStatus(fallback); } catch {}
+  process.exit(1);
+});
