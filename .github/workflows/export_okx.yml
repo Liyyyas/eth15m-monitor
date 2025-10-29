@@ -1,14 +1,13 @@
 name: Export OKX ETH 15m CSV
 
 on:
-  workflow_dispatch: {}   # 手动触发
+  workflow_dispatch: {}
 
 jobs:
-  export:
+  run:
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # 允许提交文件
-
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -17,9 +16,11 @@ jobs:
           node-version: 20
 
       - name: Run exporter
-        run: node export_okx_15m_to_csv.js
+        run: |
+          node -v
+          node export_okx_15m_to_csv.js
 
-      - name: Commit CSV (if changed)
+      - name: Commit CSV (only if generator succeeded)
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
