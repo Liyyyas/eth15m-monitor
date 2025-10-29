@@ -3,7 +3,11 @@ name: Export OKX ETH 15m CSV
 on:
   workflow_dispatch:
 
-# 防并发互踩：同组的旧运行直接取消
+# 需要写权限用于 push
+permissions:
+  contents: write
+
+# 并发互斥，防止多个导出互踩
 concurrency:
   group: export-okx-eth15m
   cancel-in-progress: true
@@ -11,13 +15,14 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0           # 非浅克隆，才能正常 pull/rebase
+          # 必须拿到完整 git 历史，才能正常 pull --rebase
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Setup node
@@ -25,11 +30,13 @@ jobs:
         with:
           node-version: 20
 
+      # 这里会运行你的导出脚本：export_okx_1y.mjs
       - name: Run exporter
         run: |
           node -v
           node export_okx_1y.mjs
 
+      # 提交 CSV（带 rebase & 重试 & 明确失败）
       - name: Commit CSV (safe rebase & retry)
         env:
           BRANCH: ${{ github.ref_name }}
@@ -38,10 +45,10 @@ jobs:
           git config user.name  "actions-user"
           git config user.email "actions@github"
 
-          # 只把目标文件加入暂存
+          # 仅把 CSV 加入暂存；不存在也不报错
           git add eth15m-monitor/okx_eth_15m.csv || true
 
-          # 若没有变化则直接退出
+          # 没有变化就直接正常结束
           if git diff --cached --quiet; then
             echo "No CSV changes to commit."
             exit 0
@@ -49,10 +56,13 @@ jobs:
 
           git commit -m "update: OKX ETH 15m CSV (1y)" || true
 
-          # 拉取最新远端并 rebase，然后带重试推送，解决“fetch first”
+          ok=0
           for i in 1 2 3 4 5; do
             git pull --rebase origin "$BRANCH" || true
-            git push origin HEAD:"$BRANCH" && break
+            git push origin HEAD:"$BRANCH" && { ok=1; break; }
             echo "Push failed, retry $i..."
             sleep $((3*i))
           done
+
+          # 5 次仍失败则让任务失败，方便你定位问题
+          [ "$ok" = 1 ] || { echo "Push failed after retries"; exit 1; }
