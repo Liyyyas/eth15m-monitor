@@ -1,7 +1,7 @@
 name: Export OKX ETH 15m CSV
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   run:
@@ -9,20 +9,18 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Run exporter
         run: |
           node -v
-          node eth15m-monitor/export_okx_1y.mjs
+          node export_okx_1y.mjs
 
-      - name: Commit CSV (even if warn)
+      - name: Commit CSV
         run: |
           git config user.name "actions-user"
           git config user.email "actions@github"
