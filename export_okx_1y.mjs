@@ -1,237 +1,160 @@
-// export_okx_1y.mjs
-// 完整版本：从 OKX 拉取 15m K 线，1 年左右（或直到达到 EXPECT_MIN_ROWS）
-// 放在 repository 根目录，workflow 中运行 `node export_okx_1y.mjs`
+// export_okx_ly.mjs —— OKX ETH/USDT 15m 历史K线（约1年），自动代理回退/退避/去重/排序/CSV输出
+import fs from 'fs/promises';
 
-import fs from 'node:fs/promises';
-import path from 'node:path';
-
-const INST_ID = 'ETH-USDT';          // 仓库里是 ETH-USDT 还是 ETH_USDT，请与 OKX API 使用一致
+const INST_ID = 'ETH-USDT';
 const BAR = '15m';
-const PAGE_LIMIT = 300;              // OKX 单页最大（保持 300）
-const EXPECT_MIN_ROWS = 35000;       // 期望的最少行数（约 1 年 15m -> ~35040）
-const MAX_PAGES = 2000;              // 防止无限循环（安全上限）
-const SLEEP_MS_BASE = 1000;          // 重试基数
-const RETRY_MAX = 5;
-const OUT_PATH = './okx_eth_15m.csv'; // 输出路径（相对 workflow 工作目录）
-const PROXY_BASE = 'https://eth-proxy.1053363050.workers.dev'; // 若无代理可设为 '' 空串
+const PAGE_LIMIT = 300;          // OKX 单页上限
+const EXPECT_MIN_ROWS = 35000;   // 15m*365 ≈ 35040
+const MAX_PAGES = 1800;          // 冗余上限
+const SLEEP_MS = 200;            // 基础退避
+const RETRY = 4;                 // 同一页最多尝试（直连+代理）
+const OUT = 'eth15m-monitor/okx_eth_15m.csv';
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
-const HEADERS = {
-  'User-Agent': UA,
-  'Accept': 'application/json,text/html,application/xhtml+xml,*/*',
-};
+// 你的 Cloudflare Worker 代理
+const PROXY_BASE = 'https://eth-proxy.1053363050.workers.dev';
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+// UA & 基本头
+const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+const HEADERS = { 'User-Agent': UA, 'Accept': 'application/json,text/plain,*/*' };
 
-function isHtml(txt) {
-  if (!txt) return false;
-  // 简单判断，如果里面有 <!DOCTYPE html 或 <html 或 <script> 且没有 JSON 结构，则判定为 HTML
-  const small = txt.slice(0, 200).toLowerCase();
-  return /<\s*!doctype|<\s*html|<\s*script/.test(small);
-}
+// 路由构造
+const okxRoute = (beforeTs) =>
+  `https://www.okx.com/api/v5/market/history-candles?instId=${encodeURIComponent(INST_ID)}&bar=${encodeURIComponent(BAR)}&limit=${PAGE_LIMIT}` +
+  (beforeTs ? `&before=${beforeTs}` : '');
 
-function okxDirectUrl(beforeTs) {
-  // OKX v5 history-candles 示例： /api/v5/market/history-candles?instId=ETH-USDT&bar=15m&limit=300&before=timestamp
-  const b = encodeURIComponent(String(beforeTs));
-  return `https://www.okx.com/api/v5/market/history-candles?instId=${encodeURIComponent(INST_ID)}&bar=${encodeURIComponent(BAR)}&limit=${PAGE_LIMIT}&before=${b}`;
-}
+const proxyRoute = (beforeTs) =>
+  `${PROXY_BASE}/api/v5/market/history-candles?instId=${encodeURIComponent(INST_ID)}&bar=${encodeURIComponent(BAR)}&limit=${PAGE_LIMIT}` +
+  (beforeTs ? `&before=${beforeTs}` : '');
 
-function proxyUrl(beforeTs) {
-  if (!PROXY_BASE) return null;
-  // 我们期望 worker 能把 query 转发，如果你的 worker 路径不同可自行调整
-  const b = encodeURIComponent(String(beforeTs));
-  return `${PROXY_BASE}/api/v5/market/history-candles?instId=${encodeURIComponent(INST_ID)}&bar=${encodeURIComponent(BAR)}&limit=${PAGE_LIMIT}&before=${b}`;
-}
+// 粗判 HTML（被风控/验证码时 OKX 会回 HTML）
+const maybeHTML = (txt) => txt && /^\s*<!DOCTYPE html/i.test(txt);
 
-async function fetchJsonWithFallback(urlDirect, urlProxy, attempt = 1) {
-  // 先直连，失败或返回 HTML 则尝试 proxy（如果有）
-  let lastErr = null;
-  // try direct
+// 休眠
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// 先直连，失败自动走代理（包括：HTML、code!=0、数据不是数组、第一页空页）
+async function fetchJsonWithFallback(urlDirect, urlProxy, { allowEmpty = false }) {
+  // 尝试直连
   try {
     const r = await fetch(urlDirect, { headers: HEADERS });
-    const txt = await r.text();
-    if (isHtml(txt)) {
-      lastErr = new Error('HTML_FROM_OKX');
-      lastErr.raw = txt;
-      throw lastErr;
-    }
-    // try parse
-    const j = JSON.parse(txt);
+    const t = await r.text();
+    if (!r.ok || maybeHTML(t)) throw new Error('HTML_OR_HTTP_ERR');
+    const j = JSON.parse(t);
+    if (j.code !== '0' || !Array.isArray(j.data)) throw new Error(`BAD_JSON code=${j.code}`);
+    if (!allowEmpty && j.data.length === 0) throw new Error('EMPTY_DIRECT');
     return j;
   } catch (e) {
-    lastErr = e;
-    // 如果有 proxy，尝试 proxy
-    if (urlProxy) {
-      try {
-        const r2 = await fetch(urlProxy, { headers: HEADERS });
-        const txt2 = await r2.text();
-        if (isHtml(txt2)) {
-          const err = new Error('HTML_FROM_PROXY');
-          err.raw = txt2;
-          throw err;
-        }
-        const j2 = JSON.parse(txt2);
-        return j2;
-      } catch (e2) {
-        lastErr = e2;
-      }
-    }
-  }
-
-  // 重试或抛出
-  if (attempt < RETRY_MAX) {
-    const backoff = SLEEP_MS_BASE * Math.pow(2, attempt);
-    await sleep(backoff);
-    return fetchJsonWithFallback(urlDirect, urlProxy, attempt + 1);
-  }
-  throw lastErr;
-}
-
-function csvEscapeCell(v) {
-  if (v === null || v === undefined) return '';
-  const s = String(v);
-  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
-
-async function ensureOutDir(outPath) {
-  const dir = path.dirname(outPath);
-  if (dir && dir !== '.') {
-    await fs.mkdir(dir, { recursive: true });
+    // 走代理
+    const r2 = await fetch(urlProxy, { headers: HEADERS });
+    const t2 = await r2.text();
+    if (!r2.ok || maybeHTML(t2)) throw new Error('HTML_OR_HTTP_ERR_PROXY');
+    const j2 = JSON.parse(t2);
+    if (j2.code !== '0' || !Array.isArray(j2.data)) throw new Error(`BAD_JSON_PROXY code=${j2.code}`);
+    return j2;
   }
 }
 
+// 主流程：从“现在”开始用 before= 向过去翻页，直到拿满一年或触顶
 async function main() {
+  console.log(`Run node -v`); 
+  console.log(process.version);
   console.log(`Start fetching ${INST_ID} ${BAR} for last ~365 days...`);
+
   const now = Date.now();
-  const oneDayMs = 24 * 60 * 60 * 1000;
-  const startTime = now - 365 * oneDayMs;
-  let beforeTs = Date.now(); // 从现在开始往回
-  let all = [];
-  const seen = new Set();
+  const oneYearAgo = now - 365 * 24 * 60 * 60 * 1000;
+
+  let cursor = now;              // before=cursor，从“现在”向过去翻
   let page = 0;
+  const seenTs = new Set();
+  const all = [];
 
-  while (all.length < EXPECT_MIN_ROWS && page < MAX_PAGES) {
+  while (page < MAX_PAGES) {
     page++;
-    const direct = okxDirectUrl(beforeTs);
-    const proxy = proxyUrl(beforeTs);
 
-    console.log(`page ${page} -> fetching before=${beforeTs} (direct)`);
-    let j;
-    try {
-      j = await fetchJsonWithFallback(direct, proxy);
-    } catch (err) {
-      console.error(`Failed to fetch page ${page}:`, err && err.message ? err.message : err);
-      // 如果收到 route not allowed 或 code !== '0' 或 data empty，则可能是被限流或 worker 未允许该 route
-      // 等待一段时间再试（退避）
-      if (page >= MAX_PAGES) break;
-      await sleep(SLEEP_MS_BASE * 5);
-      continue;
-    }
+    const direct = okxRoute(cursor);
+    const viaProxy = proxyRoute(cursor);
 
-    // OKX typical response: { code: '0', msg:'', data: [[ts, open,...,confirm], ...] }
-    if (!j || (typeof j !== 'object')) {
-      console.warn('Bad json response, skip page');
-      await sleep(SLEEP_MS_BASE * 2);
-      continue;
-    }
+    let json = null;
+    let backoff = 0;
 
-    // Some proxies/wrappers return { code: -1, msg: 'Route not allowed', data: [] }
-    if ('code' in j && j.code !== '0' && j.code !== 0) {
-      console.warn('OKX returned non-zero code:', j.code, j.msg || '');
-      // 如果 route not allowed，说明 worker 需要配置允许该路径，等待并跳 proxy/direct 切换
-      // 重试小延时
-      await sleep(SLEEP_MS_BASE * 3);
-      continue;
-    }
-
-    const data = Array.isArray(j.data) ? j.data : (j.data && Array.isArray(j.data.candles) ? j.data.candles : null);
-    if (!data || data.length === 0) {
-      console.log(`page ${page} empty; stopping.`);
-      break;
-    }
-
-    // process candles
-    // each candle: [ts, open, high, low, close, volume, ... maybe confirm '1' or '0' at index 8]
-    let lastTsOnPage = null;
-    for (const candle of data) {
-      if (!Array.isArray(candle) || candle.length < 6) continue;
-      const ts = Number(candle[0]);
-      if (!ts) continue;
-      // Some APIs append confirm flag at index 8 (as string '1'); if present and confirm !== '1' => skip
-      const confirm = (candle.length > 8 ? String(candle[8]) : '1');
-      if (confirm !== '1') {
-        // 跳过未确认 K 线（可能是正在生成的当前 candle）
-        continue;
+    // 页级重试（直连→代理，指数退避）
+    for (let t = 1; t <= RETRY; t++) {
+      try {
+        // 第1页如果空也要强制走代理重试，所以 allowEmpty=false
+        const allowEmpty = false;
+        json = await fetchJsonWithFallback(direct, viaProxy, { allowEmpty });
+        break;
+      } catch (err) {
+        backoff = SLEEP_MS * t * 5;
+        await sleep(backoff);
+        if (t === RETRY) throw err;
       }
-      if (seen.has(ts)) continue;
-      seen.add(ts);
-      lastTsOnPage = ts;
-      const row = {
-        ts,
-        iso: new Date(Number(ts)).toISOString(),
-        open: candle[1],
-        high: candle[2],
-        low: candle[3],
-        close: candle[4],
-        vol: candle[5]
-      };
-      all.push(row);
     }
 
-    console.log(`page ${page} fetched, got ${data.length} raw, ${all.length} total after dedupe.`);
-
-    // 准备下一页：使用最后一根 candle 的时间戳 - 1
-    if (!lastTsOnPage) {
-      console.log('No confirmed candles found on page; stop.');
+    const rows = json?.data ?? [];
+    if (rows.length === 0) {
+      console.log(`page ${page}: empty -> stopping`);
       break;
     }
-    beforeTs = lastTsOnPage - 1;
 
-    // 防止短时间内过快请求
-    await sleep(300); // 0.3s 短暂间隔
+    // OKX 返回通常按时间倒序（新→旧），用最后一条作为下一页 before 游标
+    let took = 0;
+    for (const k of rows) {
+      // k: [ts, o, h, l, c, volCcy, volQty, volQuote, confirm, ...]
+      if (!Array.isArray(k) || k.length < 5) continue;
+      const ts = Number(k[0]);
+      const open = Number(k[1]);
+      const high = Number(k[2]);
+      const low = Number(k[3]);
+      const close = Number(k[4]);
+      const confirm = k[8] ?? '1';
+
+      // 丢弃未确认K线
+      if (String(confirm) !== '1') continue;
+      // 去重
+      if (seenTs.has(ts)) continue;
+      seenTs.add(ts);
+
+      all.push({ ts, iso: new Date(ts).toISOString(), open, high, low, close, vol: k[6] ?? '' });
+      took++;
+    }
+
+    // 更新 before 游标：取本页“最老”的一条时间（通常是最后一条），减1ms 防止重复
+    const oldest = Number(rows[rows.length - 1]?.[0]);
+    if (Number.isFinite(oldest)) cursor = oldest - 1;
+
+    console.log(`page ${page}: got ${took} rows, cursor -> ${cursor}`);
+
+    // 到达一年前
+    if (cursor <= oneYearAgo) {
+      console.log('Reached one year boundary.');
+      break;
+    }
+
+    // 基础节流
+    await sleep(SLEEP_MS);
   }
 
-  // 排序保序（降序 - 我们是从最新往旧取的，按时间戳升序存 CSV 更直观）
-  all.sort((a, b) => a.ts - b.ts);
+  // 过滤到一年前（含）之后的 1 年数据，并按时间升序
+  const filtered = all.filter(r => r.ts >= oneYearAgo).sort((a, b) => a.ts - b.ts);
+  console.log(`DONE fetch: unique rows = ${filtered.length}`);
 
-  console.log(`Done fetch: total rows = ${all.length}`);
+  // 输出 CSV
+  const header = 'ts,iso,open,high,low,close,vol\n';
+  const body = filtered.map(r =>
+    [r.ts, r.iso, r.open, r.high, r.low, r.close, r.vol].join(',')
+  ).join('\n') + '\n';
 
-  // 如果数据不足，仍旧写出（但返回非零以便 workflow 注意）
-  await ensureOutDir(OUT_PATH);
+  await fs.writeFile(OUT, header + body, 'utf8');
+  console.log(`Wrote CSV to ./${OUT}`);
 
-  // 写 CSV
-  const header = ['ts', 'iso', 'open', 'high', 'low', 'close', 'vol'].join(',') + '\n';
-  const lines = [header];
-  for (const r of all) {
-    const row = [
-      csvEscapeCell(r.ts),
-      csvEscapeCell(r.iso),
-      csvEscapeCell(r.open),
-      csvEscapeCell(r.high),
-      csvEscapeCell(r.low),
-      csvEscapeCell(r.close),
-      csvEscapeCell(r.vol)
-    ].join(',') + '\n';
-    lines.push(row);
-  }
-  await fs.writeFile(OUT_PATH, lines.join(''), 'utf8');
-  console.log(`Wrote CSV to ${OUT_PATH}`);
-
-  if (all.length < EXPECT_MIN_ROWS) {
-    console.warn(`WARNING: fetched rows ${all.length} < expected ${EXPECT_MIN_ROWS}.`);
-    // 退出码 0 也可以，但为了提醒 workflow 我们用非零
-    process.exitCode = 1;
-  } else {
-    process.exitCode = 0;
+  if (filtered.length < EXPECT_MIN_ROWS) {
+    console.log(`WARNING: fetched rows ${filtered.length} < expected ${EXPECT_MIN_ROWS}.`);
+    process.exit(1);
   }
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err && err.stack ? err.stack : err);
-  process.exitCode = 2;
+main().catch(e => {
+  console.error('FATAL:', e?.message || e);
+  process.exit(1);
 });
