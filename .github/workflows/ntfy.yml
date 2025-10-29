@@ -2,14 +2,14 @@ name: ETH 15m Close Monitor → ntfy
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # 每分钟跑一次，用于捕捉15m收盘后1分钟内推送
+    - cron: "*/1 * * * *"    # 每分钟跑一次，用于探测15m收盘后1分钟内推送
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # 允许把状态文件提交到仓库（用于“最近检测”与去重）
+      contents: write        # 允许提交 status.json 变更
     steps:
       - uses: actions/checkout@v4
 
@@ -20,15 +20,15 @@ jobs:
       - name: Run 15m close monitor
         env:
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}   # 例: https://ntfy.sh
-          NTFY_TOPIC:  ${{ secrets.NTFY_TOPIC }}    # 你的topic
-        run: |
-          node monitor_15m_close.js
+          NTFY_TOPIC:  ${{ secrets.NTFY_TOPIC }}    # 例: ETH15_DUI
+          TARGET_URL:  ${{ secrets.TARGET_URL }}    # 例: https://liyyyas.github.io/eth15m-monitor/
+        run: node monitor_15m_close.js
 
       - name: Commit status if changed
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .state/last_ts.txt status.json || true
+          git add status.json
           git diff --cached --quiet || git commit -m "chore: update 15m status"
           git push
