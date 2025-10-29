@@ -1,0 +1,181 @@
+name: Backtest ETH 15m Strategy
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - okx_eth_15m.csv
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Write backtest script
+        run: |
+          cat > backtest_eth_15m.py << 'PY'
+          import json, math
+          import pandas as pd
+          import numpy as np
+
+          CSV_PATH = "okx_eth_15m.csv"
+          REPORT_JSON = "backtest_report.json"
+          EQUITY_CSV = "equity_curve.csv"
+          TRADES_CSV = "trades.csv"
+
+          # 读取数据
+          df = pd.read_csv(CSV_PATH)
+          # 兼容：列名可能带空格
+          df.columns = [c.strip().lower() for c in df.columns]
+          # 必要列检查
+          need = {"ts","iso","open","high","low","close","vol"}
+          if not need.issubset(set(df.columns)):
+            raise SystemExit(f"CSV 缺列，看到的是: {df.columns.tolist()}")
+
+          df = df.sort_values("ts").reset_index(drop=True)
+          for c in ["open","high","low","close","vol"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+          # 技术指标
+          df["ema34"]  = df["close"].ewm(span=34,  adjust=False).mean()
+          df["ema144"] = df["close"].ewm(span=144, adjust=False).mean()
+          # 10 根斜率（近似）：(close - close.shift(10))/10 / close.shift(10)
+          df["slope10"] = (df["close"] - df["close"].shift(10)) / (10*np.maximum(1e-9, df["close"].shift(10)))
+
+          # 策略（可按你的页面逻辑简化版）：
+          # 入场：收盘价>EMA34 且 EMA34>EMA144 且 slope10>0
+          # 出场：止损 -6% / 止盈 +10% / 或者 收盘价<EMA34（反向） 取先发生者
+          SL = -0.06
+          TP = +0.10
+
+          equity = 1.0        # 初始资金 1
+          risk_per_trade = 1  # 全仓（不加杠杆）
+          in_pos = False
+          entry_px = None
+          entry_i = None
+
+          trades = []
+          eq_curve = []
+
+          def exit_trade(exit_px, exit_idx, reason):
+            nonlocal equity, in_pos, entry_px, entry_i
+            ret = (exit_px/entry_px) - 1.0
+            equity *= (1.0 + ret*risk_per_trade)
+            trades.append({
+              "entry_time": df.loc[entry_i,"iso"],
+              "entry_px": float(entry_px),
+              "exit_time": df.loc[exit_idx,"iso"],
+              "exit_px": float(exit_px),
+              "ret": float(ret),
+              "reason": reason
+            })
+            in_pos = False
+            entry_px = None
+            entry_i = None
+
+          for i in range(len(df)):
+            px_o = df.loc[i,"open"]
+            px_h = df.loc[i,"high"]
+            px_l = df.loc[i,"low"]
+            px_c = df.loc[i,"close"]
+            ema34  = df.loc[i,"ema34"]
+            ema144 = df.loc[i,"ema144"]
+            slope  = df.loc[i,"slope10"]
+
+            # 记录权益曲线（收盘后记录）
+            eq_curve.append({"iso": df.loc[i,"iso"], "equity": float(equity)})
+
+            if not in_pos:
+              # 入场信号在"收盘"判定，下根以开盘成交（更保守）
+              if (px_c>ema34) and (ema34>ema144) and (slope>0):
+                if i+1 < len(df):
+                  entry_px = float(df.loc[i+1,"open"])
+                  entry_i = i+1
+                  in_pos = True
+            else:
+              # 已持仓：检查 SL/TP 触发（以当前K的最高/最低先到逻辑）
+              # 触发价
+              sl_px = entry_px*(1.0+SL)
+              tp_px = entry_px*(1.0+TP)
+
+              hit_sl = px_l <= sl_px
+              hit_tp = px_h >= tp_px
+
+              # 先发生者：若同根同时触发，按更不利的先（保守）
+              if hit_sl and hit_tp:
+                # 同根到达，高低都到；优先按更靠近开盘的极端价，这里保守用SL
+                exit_trade(sl_px, i, "SL&TP_samebar->SL")
+              elif hit_sl:
+                exit_trade(sl_px, i, "SL")
+              elif hit_tp:
+                exit_trade(tp_px, i, "TP")
+              else:
+                # 没触发则看反向：收盘价<EMA34 视为出场，按收盘价成交
+                if px_c < ema34:
+                  exit_trade(px_c, i, "Reverse")
+
+          # 若最后还在持仓，按最后收盘平
+          if in_pos:
+            exit_trade(float(df.iloc[-1]["close"]), len(df)-1, "EOD")
+
+          # 绩效汇总
+          rets = np.array([t["ret"] for t in trades]) if trades else np.array([])
+          wins = (rets>0).sum() if trades else 0
+          losses = (rets<=0).sum() if trades else 0
+          win_rate = float(wins/len(trades)) if len(trades)>0 else 0.0
+          avg_ret = float(rets.mean()) if len(trades)>0 else 0.0
+          gross_profit = float(rets[rets>0].sum()) if len(trades)>0 else 0.0
+          gross_loss = float(-rets[rets<=0].sum()) if len(trades)>0 else 0.0
+          profit_factor = float(gross_profit/gross_loss) if gross_loss>0 else float("inf")
+
+          # 简易最大回撤（基于权益序列）
+          ec = pd.Series([x["equity"] for x in eq_curve])
+          peak = ec.cummax()
+          dd = (ec/peak - 1.0).min() if len(ec)>0 else 0.0
+          max_dd = float(dd)
+
+          report = {
+            "trades": len(trades),
+            "win_rate": win_rate,
+            "avg_trade_return": avg_ret,
+            "profit_factor": profit_factor,
+            "final_equity": float(ec.iloc[-1] if len(ec)>0 else 1.0),
+            "max_drawdown": max_dd,
+            "params": {
+              "ema_fast": 34, "ema_slow": 144,
+              "slope_len": 10, "SL": SL, "TP": TP
+            }
+          }
+
+          pd.DataFrame(eq_curve).to_csv(EQUITY_CSV, index=False)
+          pd.DataFrame(trades).to_csv(TRADES_CSV, index=False)
+          with open(REPORT_JSON,"w",encoding="utf-8") as f:
+            json.dump(report,f,ensure_ascii=False,indent=2)
+
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Run backtest
+        run: python backtest_eth_15m.py
+
+      - name: Commit backtest results
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backtest_eth_15m.py backtest_report.json equity_curve.csv trades.csv
+          git diff --cached --quiet || git commit -m "backtest: ETH 15m strategy report"
+          git push
