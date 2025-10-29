@@ -1,56 +1,86 @@
-// export_okx_15m_to_csv.js
-// 拉取 OKX ETH-USDT 15m 历史K线并输出为 CSV：okx_eth_15m.csv
-// Node 20，无需第三方依赖
+// Export ~1 year of ETH/USDT 15m candles from OKX to okx_eth_15m.csv
+// 兼容 GitHub Actions (Node 20 自带 fetch)
 
 const fs = require('fs');
+const path = require('path');
 
-async function fetchPage(params) {
-  const url = new URL('https://www.okx.com/api/v5/market/history-candles');
-  url.searchParams.set('instId', 'ETH-USDT-SWAP');
-  url.searchParams.set('bar', '15m');
-  url.searchParams.set('limit', params.limit || '100');
-  if (params.before) url.searchParams.set('before', String(params.before));
-  // history-candles 返回更早的数据；不传 before 则从最近开始往回翻
-  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-  if (!res.ok) throw new Error(`OKX ${res.status} ${res.statusText}`);
+const INST_ID   = 'ETH-USDT';
+const BAR       = '15m';
+const LIMIT     = 200;                 // 每页条数：OKX一般支持 100~300，200较稳
+const DAYS      = 365;                 // 拉取天数：一年
+const OUT_CSV   = path.join(process.cwd(), 'okx_eth_15m.csv');
+const UA        = 'okx-eth15m-export/1.0 (+github actions)';
+
+const nowUtcMs   = Date.now();
+const startUtcMs = nowUtcMs - DAYS * 24 * 60 * 60 * 1000;
+const needBars   = Math.ceil((DAYS * 24 * 60) / 15); // 约 35040
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function fetchPage(beforeTs) {
+  const params = new URLSearchParams({
+    instId: INST_ID,
+    bar: BAR,
+    limit: String(LIMIT),
+  });
+  if (beforeTs) params.set('before', String(beforeTs)); // 从 before 之前的更早数据往回翻
+  const url = `https://www.okx.com/api/v5/market/candles?${params.toString()}`;
+
+  const res = await fetch(url, { headers: { 'User-Agent': UA } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
   const j = await res.json();
-  if (!j.data || !Array.isArray(j.data) || j.data.length === 0) return [];
-  // data: [[ts, o,h,l,c,vol, volCcy, volCcyQuote, confirm], ...] 倒序(新→旧)
-  return j.data.map(r => ({
-    ts: Number(r[0]),
-    open: Number(r[1]),
-    high: Number(r[2]),
-    low:  Number(r[3]),
-    close:Number(r[4]),
-    volume:Number(r[5]),
-  }));
+  if (j.code !== '0') throw new Error(`OKX error: ${j.code} ${j.msg || ''}`);
+  // j.data: 数组，单项结构一般为: [ts, o, h, l, c, vol, volCcy, ...]
+  return j.data || [];
 }
 
-async function main() {
-  const MAX_BARS = 3000;         // 约 31 天（15m 一天 96 根）; 想更久可改大
-  const PAGE_LIMIT = 100;        // OKX 单页上限
+(async () => {
+  console.log(`Start export ${INST_ID} ${BAR}, last ${DAYS} days...`);
   let all = [];
   let before = undefined;
-  while (all.length < MAX_BARS) {
-    const page = await fetchPage({ limit: PAGE_LIMIT, before });
-    if (page.length === 0) break;
-    all = all.concat(page);
-    // 下一轮往更早翻：取这一页里“最旧”的时间
-    const oldest = page[page.length - 1].ts;
-    before = oldest;
-    // 防止 API 速率限制，稍微歇一歇
-    await new Promise(r => setTimeout(r, 200));
-  }
-  // OKX 返回每页倒序，这里把总数据按时间升序
-  all.sort((a,b)=> a.ts - b.ts);
 
-  const lines = ['ts,open,high,low,close,volume'];
-  for (const k of all) {
-    const iso = new Date(k.ts).toISOString();
-    lines.push(`${iso},${k.open},${k.high},${k.low},${k.close},${k.volume}`);
-  }
-  fs.writeFileSync('okx_eth_15m.csv', lines.join('\n'), 'utf8');
-  console.log(`Wrote okx_eth_15m.csv with ${all.length} rows`);
-}
+  while (true) {
+    const batch = await fetchPage(before);
+    if (!batch.length) break;
 
-main().catch(e => { console.error(e); process.exit(1); });
+    all.push(...batch);
+    // OKX 返回通常是按时间倒序（最新→最旧）
+    const oldestTs = Math.min(...batch.map(r => +r[0]));
+    before = oldestTs; // 下一页继续往更早翻
+
+    console.log(`Fetched page: ${batch.length} bars, oldest=${new Date(oldestTs).toISOString()}, total=${all.length}`);
+
+    if (oldestTs <= startUtcMs) break;        // 已经翻到一年之前
+    if (all.length > needBars * 1.5) break;   // 安全边界，防止无限翻页
+    await sleep(150);                          // 给 API 一点喘息，降低限速风险
+  }
+
+  // 去重、过滤到一年范围、按时间正序
+  const map = new Map();
+  for (const r of all) map.set(+r[0], r);
+  all = Array.from(map.values())
+    .filter(r => +r[0] >= startUtcMs)
+    .sort((a, b) => +a[0] - +b[0]);
+
+  console.log(`After clean: ${all.length} bars (expect ~${needBars})`);
+
+  // 生成 CSV
+  const header = 'ts,iso,open,high,low,close,vol';
+  const lines = [header];
+  for (const r of all) {
+    const ts    = +r[0];
+    const iso   = new Date(ts).toISOString();
+    const open  = r[1];
+    const high  = r[2];
+    const low   = r[3];
+    const close = r[4];
+    const vol   = r[5]; // 基于张/币的成交量，OKX定义参见其文档
+    lines.push([ts, iso, open, high, low, close, vol].join(','));
+  }
+
+  fs.writeFileSync(OUT_CSV, lines.join('\n'));
+  console.log(`Saved: ${OUT_CSV} (${lines.length - 1} rows)`);
+})().catch(e => {
+  console.error(e);
+  process.exit(1);
+});
