@@ -3,113 +3,83 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>ETH/USDT 15分钟监控</title>
-
+  <title>ETH/USDT 15 分钟监控</title>
   <style>
-    :root{
-      --bg:#0b0f16; --card:#141b25; --ink:#dfe7f3; --muted:#8aa4bf;
-      --accent:#22c55e; --bad:#ff5c5c;
-    }
+    :root{--bg:#0b0f16;--card:#141b25;--good:#22c55e;--bad:#f43f5e;--ink:#e5e7eb;--muted:#93a3b8;}
     *{box-sizing:border-box}
-    body{
-      margin:0; background:var(--bg); color:var(--ink);
-      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,"Noto Sans SC","PingFang SC",sans-serif;
-    }
-    a{color:#8ab4ff; text-decoration:none}
-    header{padding:18px 16px; border-bottom:1px solid #1f2937;}
-    .wrap{max-width:860px; margin:0 auto; padding:0 12px}
-    .title{font-size:28px; font-weight:900; letter-spacing:.5px}
-    .sub{opacity:.8; margin-left:8px; font-size:14px}
-    .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:6px 0}
-    .row-end{margin-left:auto}
-    .card{background:var(--card); border:1px solid #1f2937; border-radius:12px; padding:14px 16px; box-shadow:0 1px 6px rgba(0,0,0,.25)}
-    .ok{color:var(--accent); font-weight:700}
-    .no{color:var(--bad); font-weight:700}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,"PingFang SC";}
+    header{padding:18px 16px;border-bottom:1px solid #22324a}
+    .title{font-size:28px;font-weight:900}
+    .sub{opacity:.7;margin-left:8px}
+    .wrap{max-width:860px;margin:0 auto}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .row-end{margin-left:auto;opacity:.75}
+    .card{background:var(--card);border:1px solid #22324a;border-radius:12px;padding:14px 16px;box-shadow:0 1px 6px rgba(0,0,0,.2)}
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .small{color:var(--muted); font-size:12px}
-    .footer{opacity:.7; text-align:center; padding:24px 16px}
+    .muted{color:var(--muted);font-size:12px}
+    .signal{font-size:18px;line-height:1.5}
+    .ok{color:var(--good)} .no{color:var(--bad)}
+    .chip{background:#1a2333;border:1px solid #24324a;color:#8ab4ff;border-radius:999px;padding:3px 10px}
+    .footer{opacity:.7;text-align:center;padding:24px 16px}
   </style>
 </head>
 <body>
-  <header>
-    <div class="wrap row" style="justify-content:space-between;">
-      <div class="title">ETH/USDT <span class="sub">15 分钟监控</span></div>
-      <div class="row-end small">下一次拉取：<span id="nextAt">--:--</span></div>
-    </div>
-  </header>
+<header>
+  <div class="wrap row">
+    <div class="title">ETH/USDT <span class="sub">15 分钟监控</span></div>
+    <div class="row-end chip">下一次拉取： <span id="next" class="mono">--:--</span></div>
+  </div>
+</header>
 
-  <main class="wrap" style="margin-top:10px;">
-    <div id="panel" class="card">加载中…</div>
-    <div class="small" style="margin-top:10px;">
-      说明：云端脚本每分钟检查；只在<strong>新收盘K线</strong>出现时计算；只在<strong>状态变化</strong>（可开⇄不可开）时推送到 ntfy。
-    </div>
-  </main>
+<div class="wrap" style="margin-top:14px;">
+  <div id="panel" class="card">等待生成第一次状态…</div>
+  <div class="muted" style="margin-top:10px;">
+    说明：云端脚本每分钟检查；只在新收盘K数出现时计算；只在状态变化（可开↔不可开）时推送到 ntfy。
+  </div>
+</div>
 
-  <div class="footer small">© ETH15m Monitor</div>
+<div class="footer">© ETH15m Monitor</div>
 
-  <script>
-    function fmtNum(v, n=2){
-      const x = Number(v);
-      return Number.isFinite(x) ? x.toFixed(n) : '-';
-    }
+<script>
+async function load(){
+  try{
+    const r = await fetch('status.json?_=' + Date.now(), { cache:'no-store' });
+    if(!r.ok) throw new Error('status.json not found');
+    const s = await r.json();
 
-    async function render(){
-      try{
-        const res = await fetch('./status.json?ts=' + Date.now(), { cache:'no-store' });
-        if(!res.ok) throw new Error('status.json not found yet');
-        const s = await res.json();
+    const title = s.ok ? '✅ 可开双向' : '❌ 暂不建议';
+    const cls = s.ok ? 'ok' : 'no';
+    const html = `
+      <div class="signal ${cls}"><strong>${title}</strong>  |  <strong>ETH</strong>  |  <span class="muted">最近检测：${s.last_check_iso || '-'}</span></div>
+      <div class="row mono">收盘(UTC)： ${s.last_candle_iso || '-'}</div>
+      <div class="row mono">当前价=${(+s.price).toFixed(2)}， EMA34=${(+s.ema34).toFixed(2)}， EMA144=${(+s.ema144).toFixed(2)}</div>
+      <div class="row mono">均线距离： ${(s.dist34*100).toFixed(3)}%  /  ${(s.dist144*100).toFixed(3)}%</div>
+      <div class="row mono">斜率(10根)： ${(s.slope34*100).toFixed(3)}%  /  ${(s.slope144*100).toFixed(3)}%</div>
+      <div class="row">对冲 Meme 选择： <span class="mono">${s.meme || '-'}</span></div>
+      <div class="muted" style="margin-top:8px;">规则：ETH 止损 6% ，止盈 10% ；Meme：止损 10% ，止盈 10% ；+8% 先移动保本；+15% 启用 2% 移动止盈。</div>
+    `;
+    document.getElementById('panel').innerHTML = html;
+  }catch(e){
+    document.getElementById('panel').innerHTML = '<div class="muted">等待生成一次状态…</div>';
+  }
+}
+load();
+setInterval(load, 30000); // 每 30s 刷新页面展示
 
-        const ok = !!s.use;
-        const title = ok ? '✅ 可开双向' : '❌ 暂不建议';
-
-        const html = `
-          <div class="row">
-            <strong class="${ok ? 'ok':'no'}">${title}</strong>
-            <span>｜${s.direction || '-'}</span>
-            <span class="row-end small">最近检测：<span class="mono">${s.last_check_iso || '-'}</span></span>
-          </div>
-
-          <div class="row mono">
-            收盘(UTC)：<span>${s.last_candle_iso || '-'}</span>
-          </div>
-
-          <div class="row mono">
-            当前价=${fmtNum(s.close)}，
-            EMA34=${fmtNum(s.ema34)}，
-            EMA144=${fmtNum(s.ema144)}
-          </div>
-
-          <div class="row mono">均线距离：${fmtNum(s.d34,4)}% / ${fmtNum(s.d144,4)}%</div>
-          <div class="row mono">斜率(10根)：${fmtNum(s.s34,4)}% / ${fmtNum(s.s144,4)}%</div>
-
-          <div class="row">对冲 Meme 选择：<strong>${s.meme || '-'}</strong></div>
-
-          <div class="row small">
-            规则：ETH止损6%/止盈10%；Meme止损10%/止盈10%；+8%保本，+15%启用2%移动止盈
-          </div>
-        `;
-        document.getElementById('panel').innerHTML = html;
-      }catch(e){
-        document.getElementById('panel').innerHTML = '等待生成第一次状态…';
-      }
-    }
-
-    function tickCountdown(ms){
-      const el = document.getElementById('nextAt');
-      let left = Math.floor(ms/1000);
-      const t = setInterval(()=>{
-        if(left <= 0){ el.textContent = '正在刷新…'; clearInterval(t); return; }
-        const m = String(Math.floor(left/60)).padStart(2,'0');
-        const s = String(left%60).padStart(2,'0');
-        el.textContent = `${m}:${s}`;
-        left--;
-      }, 1000);
-    }
-
-    // 先渲染一次，然后每 30 秒拉取一次
-    render();
-    tickCountdown(30000);
-    setInterval(()=>{ render(); tickCountdown(30000); }, 30000);
-  </script>
+// 简单 15m 倒计时（仅展示）
+(function(){
+  const el = document.getElementById('next');
+  function tick(){
+    const now = Date.now();
+    const m15 = 15*60*1000;
+    const rem = m15 - (now % m15);
+    const s = Math.floor(rem/1000)%60;
+    const m = Math.floor(rem/60000);
+    el.textContent = (m+'').padStart(2,'0')+':'+(s+'').padStart(2,'0');
+  }
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>
 </body>
 </html>
