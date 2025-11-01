@@ -3,9 +3,6 @@ name: Export OKX ETH 15m CSV
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 concurrency:
   group: export-okx-eth15m
   cancel-in-progress: true
@@ -13,43 +10,50 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 25
+
     steps:
-      - name: Checkout (full history)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0        # 后面需要 pull --rebase
           persist-credentials: true
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Run exporter
+        shell: bash
         run: |
           node -v
           node export_okx_1y.mjs
 
       - name: Commit CSV (safe rebase & retry)
+        shell: bash
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
           set -e
           git config user.name  "actions-user"
           git config user.email "actions@github"
-          # 仅在文件变化时提交（原子写保证存在）
+
+          # 仅把 CSV 加入暂存区（文件在仓库根目录）
           git add okx_eth_15m.csv || true
+
+          # 没有变化就直接结束（避免“空提交”错误）
           if git diff --cached --quiet; then
             echo "No CSV changes to commit."
             exit 0
           fi
-          git commit -m "update: OKX ETH 15m CSV (1y)" || true
 
-          # 防止远端快进冲突：先 rebase 再 push（最多 5 次）
-          for i in 1 2 3 4 5; do
+          git commit -m "update: OKX ETH 15m CSV (1y)"
+
+          # 安全 push：先 rebase 再 push，失败最多重试 4 次
+          for i in 1 2 3 4; do
             git pull --rebase origin "$BRANCH" || true
             git push origin HEAD:"$BRANCH" && break
-            echo "Push failed, retry $i ..."
+            echo "Push failed, retry $i..."
             sleep $((3*i))
           done
