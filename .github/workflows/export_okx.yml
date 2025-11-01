@@ -1,7 +1,9 @@
 name: Export OKX ETH 15m CSV
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "14 1 * * *"   # 每天 09:14 北京时间左右跑一遍（GitHub 用 UTC）
 
 concurrency:
   group: export-okx-eth15m
@@ -10,7 +12,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -28,19 +30,21 @@ jobs:
         run: |
           node -v
           node export_okx_1y.mjs
+        env:
+          # 如需改代理域名，可在脚本里改 PROXY_BASE 或者改成从环境读
+          # PROXY_BASE: https://your-worker.workers.dev
 
       - name: Commit CSV (safe rebase & retry)
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
-          set -x
+          set -e
           git config user.name  "actions-user"
           git config user.email "actions@github"
-
-          # 只把目标文件加入暂存
+          # 仅把 CSV 加入暂存区
           git add eth15m-monitor/okx_eth_15m.csv || true
 
-          # 若没有变更就直接退出
+          # 若没有变化就直接退出成功
           if git diff --cached --quiet; then
             echo "No CSV changes to commit."
             exit 0
@@ -48,8 +52,8 @@ jobs:
 
           git commit -m "update: OKX ETH 15m CSV (1y)" || true
 
-          # 先拉取并rebase，避免 'fetch first'
-          for i in 1 2 3 4 5; do
+          # 处理 fast-forward / fetch first 等问题（最多 4 次退避重试）
+          for i in 1 2 3 4; do
             git pull --rebase origin "$BRANCH" || true
             git push origin HEAD:"$BRANCH" && break
             echo "Push failed, retry $i..."
