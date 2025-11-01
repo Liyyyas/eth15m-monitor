@@ -1,55 +1,44 @@
 name: Export OKX ETH 15m CSV
-
 on:
-  workflow_dispatch: {}
-  schedule:
-    - cron: "14 1 * * *"   # 每天 09:14 北京时间左右自动运行
-
-concurrency:
-  group: export-okx-eth15m
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
 
       - name: Setup node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Run exporter
+      - name: Sanity check
         run: |
-          node -v
-          node eth15m-monitor/export_okx_1y.mjs
+          pwd
+          ls -la
+
+      - name: Run exporter
+        run: node export_okx_1y.mjs   # ← 和根目录文件名一字不差
 
       - name: Commit CSV (safe rebase & retry)
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
-          set -e
+          set -x
           git config user.name  "actions-user"
           git config user.email "actions@github"
-          git add eth15m-monitor/okx_eth_15m.csv || true
-
+          git add okx_eth_15m.csv || true
           if git diff --cached --quiet; then
-            echo "No CSV changes to commit."
-            exit 0
+            echo "No CSV changes to commit."; exit 0
           fi
-
           git commit -m "update: OKX ETH 15m CSV (1y)" || true
-
-          for i in 1 2 3 4; do
+          for i in 1 2 3 4 5; do
             git pull --rebase origin "$BRANCH" || true
             git push origin HEAD:"$BRANCH" && break
-            echo "Push failed, retry $i..."
-            sleep $((3*i))
+            echo "Push failed, retry $i..."; sleep $((3*i))
           done
