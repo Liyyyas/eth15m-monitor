@@ -27,20 +27,11 @@ jobs:
         with:
           node-version: 20
 
-      # 可选兜底：在仓库 Settings → Secrets and variables → Actions 添加这些再启用
-      # - KAGGLE_USERNAME
-      # - KAGGLE_KEY
-      # - MINUTE_CSV_URL  （例如某个可直链的分钟线CSV）
       - name: Run exporter (multi-source)
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-          MINUTE_CSV_URL: ${{ secrets.MINUTE_CSV_URL }}
         run: |
           node -v
           node export_eth_15m_multi.mjs
 
-      # 总是把结果（无论成功失败）打包成工件，便于排查
       - name: Upload CSV artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -49,7 +40,6 @@ jobs:
           path: okx_eth_15m.csv
           if-no-files-found: warn
 
-      # 仅当运行成功（脚本未抛错且写出了CSV）时，才提交到仓库
       - name: Commit CSV (only on success)
         if: success()
         env:
@@ -58,13 +48,15 @@ jobs:
           set -e
           git config user.name  "actions-user"
           git config user.email "actions@github"
+
           git add okx_eth_15m.csv || true
+
           if git diff --cached --quiet; then
             echo "No CSV changes to commit."
             exit 0
           fi
-          git commit -m "update: ETH/USDT 15m CSV (1y, multi-source)"
-          # 避免并发/快照落后：rebase + 重试
+
+          git commit -m "update: ETH/USDT 15m CSV (1y, multi-source, hardened)"
           for i in 1 2 3 4 5; do
             git pull --rebase origin "$BRANCH" || true
             git push origin HEAD:"$BRANCH" && break
