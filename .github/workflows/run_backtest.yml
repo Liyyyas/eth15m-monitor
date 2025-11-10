@@ -3,30 +3,39 @@ name: Run ETH 15m Backtest
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install Python dependencies
         run: |
+          pip install --upgrade pip
+          # 目前脚本只用到 pandas，如果以后你加别的库就在下面补
           pip install pandas
 
-      - name: Run backtest
+      - name: Run backtest script
+        # 关键点：把所有 print 的回测结果重定向到 backtest_eth_15m_report.txt
         run: |
-          python backtest_eth_15m.py
+          python backtest_eth_15m.py > backtest_eth_15m_report.txt
 
-      # ✅ 只上传 backtest_eth_15m_report.txt
       - name: Upload backtest report
         uses: actions/upload-artifact@v4
         with:
-          name: backtest_eth_15m_report
+          name: eth15m-backtest-report
           path: backtest_eth_15m_report.txt
+          if-no-files-found: error
