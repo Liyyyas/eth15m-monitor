@@ -1,0 +1,33 @@
+name: Audit ETH 15m CSV
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run audit
+        run: |
+          node -v
+          node audit_eth_csv.mjs
+
+      - name: Upload gaps & summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: eth15m-audit
+          path: |
+            okx_eth_15m_gaps.csv
+            okx_eth_15m_audit.json
+          if-no-files-found: error
