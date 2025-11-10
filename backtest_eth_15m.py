@@ -18,7 +18,7 @@ TRAIL_PCT       = 0.02                # 启动后回撤 2% 平仓
 
 EMA_FAST        = 34                  # 快线
 EMA_SLOW        = 144                 # 慢线
-CONFIRM_BARS    = 5                   # 反转连续确认根数
+CONFIRM_BARS    = 3                   # 反转连续确认根数
 
 # 震荡过滤：EMA34/144 距离太近就视为震荡（不新开仓）
 MIN_SPREAD_RATIO = 0.0015             # |ema34-ema144| / close < 0.15% 视为震荡
