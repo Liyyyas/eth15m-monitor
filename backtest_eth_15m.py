@@ -2,40 +2,31 @@
 # -*- coding: utf-8 -*-
 
 import pandas as pd
-from datetime import timedelta
+import numpy as np
 
-# ========== 基本参数 ==========
-CSV_PATH          = "okx_eth_15m.csv"   # K线数据
-INITIAL_EQUITY    = 50.0                # 初始资金
-LEVERAGE          = 5.0                 # 杠杆
-FEE_RATE          = 0.0007              # 单边手续费率（0.07%）
+CSV_PATH = "okx_eth_15m.csv"
 
-# 仓位 = 资金比例
-POSITION_EQUITY_RATIO = 0.5            # 每次用总资金的 50% 做保证金
+INITIAL_EQUITY = 50.0
+LEVERAGE = 5.0
+RISK_FRACTION = 0.5    # 用总资金 50% 做保证金
+FEE_RATE = 0.0007       # 单边手续费
 
-# EMA / 趋势相关
-EMA_FAST_PERIOD   = 34
-EMA_SLOW_PERIOD   = 144
-EMA_CONFIRM_BARS  = 3                  # 方向确认需要连续 3 根
+EMA_FAST = 34
+EMA_SLOW = 144
 
-# 震荡过滤（越小越严格）
-CHOP_THRESHOLD_PCT = 0.0015            # 0.15% （|close-EMA|/close）
+ATR_WINDOW = 14
+ATR_MULT_SL = 2.5       # ATR 初始止损倍数
+ATR_MULT_TRAIL = 3.5    # ATR 追踪启用倍数（可按你喜好调）
 
-# ATR 动态止损参数
-ATR_PERIOD           = 14
-ATR_MULT_SL          = 2.5             # 止损 = 2.5 * ATR
-ATR_MULT_TP_TRIGGER  = 3.0             # 浮盈 >= 3 * ATR → 启动追踪止盈
-ATR_MULT_TRAIL_BACK  = 1.0             # 启动后回撤 1 * ATR 止盈
-
-# 为防止浮点误差搞出负资金
-MIN_EQUITY_TO_TRADE  = 0.5
+# === 新增：价格百分比移动止盈规则 ===
+EXTRA_PROFIT_TRIGGER = 0.06   # 浮盈 >= 6% 启动
+EXTRA_TRAIL_PCT = 0.03        # 3% 回撤（基于入场后最高/最低价）
 
 
-# ========== 数据读取 ==========
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
 
-    # 处理时间列：优先 iso，其次 ts，再其次第一列兜底
+    # 处理时间列
     if "iso" in df.columns:
         df["dt"] = pd.to_datetime(df["iso"], utc=True, errors="coerce")
     elif "ts" in df.columns:
@@ -50,169 +41,130 @@ def load_data(path: str) -> pd.DataFrame:
         df["dt"] = pd.to_datetime(pd.to_numeric(df[first_col], errors="coerce"),
                                   unit=unit, utc=True, errors="coerce")
 
-    df = df.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
-
     for col in ["open", "high", "low", "close"]:
         if col not in df.columns:
             raise ValueError(f"CSV 缺少列: {col}")
 
+    df = df.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
     return df
 
 
-# ========== 指标计算：EMA & ATR & 震荡过滤 ==========
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    close = df["close"].astype(float)
-    high = df["high"].astype(float)
-    low  = df["low"].astype(float)
-
-    # EMA
-    df["ema_fast"] = close.ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-    df["ema_slow"] = close.ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    c = df["close"]
+    df["ema_fast"] = c.ewm(span=EMA_FAST, adjust=False).mean()
+    df["ema_slow"] = c.ewm(span=EMA_SLOW, adjust=False).mean()
 
     # ATR
-    prev_close = close.shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
+    h = df["high"]
+    l = df["low"]
+    prev_close = c.shift(1)
+    tr1 = h - l
+    tr2 = (h - prev_close).abs()
+    tr3 = (l - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df["atr"] = tr.rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean()
-
-    # 震荡过滤：价格离两条 EMA 都非常近就认为是“震荡”
-    dist_fast = (close - df["ema_fast"]).abs() / close
-    dist_slow = (close - df["ema_slow"]).abs() / close
-    df["is_chop"] = (dist_fast <= CHOP_THRESHOLD_PCT) & (dist_slow <= CHOP_THRESHOLD_PCT)
+    df["atr"] = tr.rolling(window=ATR_WINDOW, min_periods=ATR_WINDOW).mean()
 
     df = df.dropna(subset=["ema_fast", "ema_slow", "atr"]).reset_index(drop=True)
     return df
 
 
-def get_ema_trend_sign(row) -> int:
-    """
-    ema_fast > ema_slow → +1（多头）
-    ema_fast < ema_slow → -1（空头）
-    否则 0（纠缠 / 无方向）
-    """
-    if row["ema_fast"] > row["ema_slow"]:
-        return 1
-    elif row["ema_fast"] < row["ema_slow"]:
-        return -1
-    else:
-        return 0
-
-
-# ========== 回测主体 ==========
 def backtest(df: pd.DataFrame):
     equity = INITIAL_EQUITY
 
     in_pos = False
-    direction = 0         # +1 多单，-1 空单
+    direction = 0      # 1 多，-1 空
     entry_price = None
     entry_time = None
-    margin_used = None
     size = None
-    atr_at_entry = None
-    best_price = None     # 多单：最高价；空单：最低价
-    trail_active = False
-    stop_price = None
+    margin_used = None
+
+    atr_stop = None
+    atr_trail_on = False
+    extra_trail_on = False
+
+    best_price = None  # 多单记录最高价，空单记录最低价
 
     trades = []
 
-    # 用来做 EMA 方向的连续确认
-    ema_sign_hist = []
-
-    for _, row in df.iterrows():
+    for i, row in df.iterrows():
         dt = row["dt"]
-        o = float(row["open"])
-        h = float(row["high"])
-        l = float(row["low"])
-        c = float(row["close"])
+        o, h, l, c = map(float, [row["open"], row["high"], row["low"], row["close"]])
         ema_fast = float(row["ema_fast"])
         ema_slow = float(row["ema_slow"])
         atr = float(row["atr"])
-        is_chop = bool(row["is_chop"])
 
-        # --- 更新 EMA 方向队列 ---
-        ema_sign = get_ema_trend_sign(row)
-        ema_sign_hist.append(ema_sign)
-        if len(ema_sign_hist) > EMA_CONFIRM_BARS:
-            ema_sign_hist.pop(0)
-
-        confirmed_dir = 0
-        if len(ema_sign_hist) == EMA_CONFIRM_BARS:
-            if all(s == 1 for s in ema_sign_hist):
-                confirmed_dir = 1
-            elif all(s == -1 for s in ema_sign_hist):
-                confirmed_dir = -1
-
-        # ========== 先管理已有持仓 ==========
+        # 先管理已有仓位
         if in_pos:
-            # 更新 best_price（多：最高，空：最低）
-            if direction == 1:
-                best_price = h if best_price is None else max(best_price, h)
-            else:  # direction == -1
-                best_price = l if best_price is None else min(best_price, l)
-
-            # 初始固定 ATR 止损
-            if direction == 1:
-                base_stop = entry_price - ATR_MULT_SL * atr_at_entry
+            # 更新入场以来的最佳价格（多=最高，空=最低）
+            if best_price is None:
+                best_price = h if direction == 1 else l
             else:
-                base_stop = entry_price + ATR_MULT_SL * atr_at_entry
-
-            # 启动追踪止盈？
-            if not trail_active:
                 if direction == 1:
-                    # 浮盈（价格） = best_price - entry_price
-                    if best_price - entry_price >= ATR_MULT_TP_TRIGGER * atr_at_entry:
-                        trail_active = True
+                    best_price = max(best_price, h)
                 else:
-                    if entry_price - best_price >= ATR_MULT_TP_TRIGGER * atr_at_entry:
-                        trail_active = True
+                    best_price = min(best_price, l)
 
-            # 计算当前追踪止损价
-            if trail_active:
-                if direction == 1:
-                    trail_stop = best_price - ATR_MULT_TRAIL_BACK * atr_at_entry
-                    stop_price = max(base_stop, trail_stop) if stop_price is None else max(stop_price, base_stop, trail_stop)
-                else:
-                    trail_stop = best_price + ATR_MULT_TRAIL_BACK * atr_at_entry
-                    stop_price = min(base_stop, trail_stop) if stop_price is None else min(stop_price, base_stop, trail_stop)
+            # 1）ATR 初始止损
+            if direction == 1:
+                atr_stop = entry_price - ATR_MULT_SL * atr
             else:
-                # 还没启用追踪，只用固定 ATR
-                if stop_price is None:
-                    stop_price = base_stop
-                else:
-                    # 多单不能把止损抬得比 base_stop 更宽
-                    if direction == 1:
-                        stop_price = max(stop_price, base_stop)
-                    else:
-                        stop_price = min(stop_price, base_stop)
+                atr_stop = entry_price + ATR_MULT_SL * atr
 
+            # 2）ATR 浮盈足够时启用 ATR 追踪
+            #   当价格偏离 entry >= ATR_MULT_TRAIL * ATR，就开始用 ATR 追踪止损
+            if direction == 1:
+                move_from_entry = best_price - entry_price
+            else:
+                move_from_entry = entry_price - best_price
+
+            if move_from_entry >= ATR_MULT_TRAIL * atr:
+                atr_trail_on = True
+
+            if atr_trail_on:
+                if direction == 1:
+                    trail_stop_by_atr = best_price - ATR_MULT_SL * atr
+                    atr_stop = max(atr_stop, trail_stop_by_atr)
+                else:
+                    trail_stop_by_atr = best_price + ATR_MULT_SL * atr
+                    atr_stop = min(atr_stop, trail_stop_by_atr)
+
+            # 3）新增：价格百分比移动止盈（浮盈 >= 6% → 3% 回撤）
+            #   gain_pct = (best_price / entry_price - 1) * direction
+            if direction == 1:
+                gain_pct = (best_price / entry_price - 1.0)
+            else:
+                gain_pct = (entry_price / best_price - 1.0)
+
+            if gain_pct >= EXTRA_PROFIT_TRIGGER:
+                extra_trail_on = True
+
+            if extra_trail_on:
+                if direction == 1:
+                    # 多单：最高价回撤 3% 为价格止损线
+                    extra_stop = best_price * (1.0 - EXTRA_TRAIL_PCT)
+                    atr_stop = max(atr_stop, extra_stop)
+                else:
+                    # 空单：最低价反弹 3% 为止损线
+                    extra_stop = best_price * (1.0 + EXTRA_TRAIL_PCT)
+                    atr_stop = min(atr_stop, extra_stop)
+
+            # 决定这根K线是否触发止损
             exit_price = None
             exit_reason = None
 
-            # === 止损/追踪出场：用当根的 low/high 模拟打到价格 ===
             if direction == 1:
-                if l <= stop_price:
-                    exit_price = stop_price
+                if l <= atr_stop:   # 多单被打到止损
+                    exit_price = atr_stop
                     exit_reason = "atr_sl_or_trail"
             else:
-                if h >= stop_price:
-                    exit_price = stop_price
+                if h >= atr_stop:   # 空单被打到止损
+                    exit_price = atr_stop
                     exit_reason = "atr_sl_or_trail"
 
-            # === EMA 反转确认强平（方向反了，且已确认） ===
-            if exit_price is None and confirmed_dir != 0 and confirmed_dir != direction:
-                exit_price = c
-                exit_reason = "ema_flip_close"
-
+            # 如触发离场，结算
             if exit_price is not None:
-                # 结算
                 notional = margin_used * LEVERAGE
-                if direction == 1:
-                    gross_pnl = (exit_price - entry_price) * size
-                else:
-                    gross_pnl = (entry_price - exit_price) * size
-
+                gross_pnl = (exit_price - entry_price) * size * direction
                 fee_open = notional * FEE_RATE
                 fee_close = abs(exit_price * size) * FEE_RATE
                 pnl_net = gross_pnl - fee_open - fee_close
@@ -228,55 +180,50 @@ def backtest(df: pd.DataFrame):
                     "margin_used": margin_used,
                     "pnl_net": pnl_net,
                     "pnl_pct_on_margin": pnl_net / margin_used if margin_used > 0 else 0.0,
-                    "equity_after": equity,
+                    "equity_after": equity
                 })
 
-                # 清空仓位
                 in_pos = False
                 direction = 0
                 entry_price = None
                 entry_time = None
-                margin_used = None
                 size = None
-                atr_at_entry = None
+                margin_used = None
+                atr_stop = None
+                atr_trail_on = False
+                extra_trail_on = False
                 best_price = None
-                trail_active = False
-                stop_price = None
 
-        # ========== 再考虑是否开新仓 ==========
-        if equity <= MIN_EQUITY_TO_TRADE:
-            continue  # 资金基本归零，停止开仓
+        # 如果没仓位并且还有钱 → 看是否开仓（原始策略逻辑）
+        if (not in_pos) and equity > 0:
+            if ema_fast > ema_slow:
+                new_dir = 1
+            elif ema_fast < ema_slow:
+                new_dir = -1
+            else:
+                new_dir = 0
 
-        if (not in_pos) and confirmed_dir != 0 and (not is_chop):
-            # 开仓方向 = EMA 确认方向
-            direction = confirmed_dir
+            if new_dir != 0:
+                margin_used = equity * RISK_FRACTION
+                notional = margin_used * LEVERAGE
+                entry_price = c
+                size = notional / entry_price * new_dir
+                entry_time = dt
+                direction = new_dir
+                in_pos = True
 
-            # 仓位 = 当前资金的 50%
-            margin_used = equity * POSITION_EQUITY_RATIO
-            if margin_used <= 0:
-                continue
-            notional = margin_used * LEVERAGE
-            size = notional / c
-
-            entry_price = c
-            entry_time = dt
-            atr_at_entry = atr
-            best_price = c
-            trail_active = False
-            stop_price = None
-
-            in_pos = True
+                atr_trail_on = False
+                extra_trail_on = False
+                best_price = None
+                atr_stop = None
 
     return equity, trades
 
 
-# ========== 结果统计输出 ==========
-def summarize(df: pd.DataFrame, equity, trades):
+def summarize(df: pd.DataFrame, equity: float, trades):
     print(f"数据行数: {len(df)}")
     print(f"时间范围: {df['dt'].iloc[0]} -> {df['dt'].iloc[-1]}")
     print()
-    print("========== 回测结果（原始策略 + ATR 动态止损/追踪） ==========")
-
     n = len(trades)
     wins = sum(1 for t in trades if t["pnl_net"] > 0)
     losses = sum(1 for t in trades if t["pnl_net"] < 0)
@@ -289,7 +236,6 @@ def summarize(df: pd.DataFrame, equity, trades):
     avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0.0
     avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0.0
 
-    # 最大回撤
     eq_curve = [INITIAL_EQUITY]
     for t in trades:
         eq_curve.append(t["equity_after"])
@@ -303,8 +249,8 @@ def summarize(df: pd.DataFrame, equity, trades):
             max_dd = dd
 
     total_ret = (equity - INITIAL_EQUITY) / INITIAL_EQUITY
-    ann_ret = total_ret  # 一年数据约等于总收益率
 
+    print("========== 回测结果（原始策略 + ATR 动态止损/追踪 + 6%浮盈→3%回撤） ==========")
     print(f"总交易数: {n}")
     print(f"胜: {wins}  负: {losses}  和: {flats}")
     win_rate = wins / n * 100 if n > 0 else 0.0
@@ -314,7 +260,7 @@ def summarize(df: pd.DataFrame, equity, trades):
     print(f"平均盈利单: {avg_win:.4f} U")
     print(f"平均亏损单: {avg_loss:.4f} U")
     print(f"最大回撤: {max_dd*100:.2f}%")
-    print(f"总收益率: {total_ret*100:.2f}%  | 年化收益率估计: {ann_ret*100:.2f}%")
+    print(f"总收益率: {total_ret*100:.2f}%")
     print()
     print("前 5 笔交易示例:")
     for t in trades[:5]:
@@ -324,5 +270,5 @@ def summarize(df: pd.DataFrame, equity, trades):
 if __name__ == "__main__":
     df = load_data(CSV_PATH)
     df = add_indicators(df)
-    equity, trades = backtest(df)
-    summarize(df, equity, trades)
+    final_equity, trades = backtest(df)
+    summarize(df, final_equity, trades)
