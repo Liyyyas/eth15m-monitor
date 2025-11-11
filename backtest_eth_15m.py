@@ -12,7 +12,7 @@ import numpy as np
 CSV_PATH       = "okx_eth_15m.csv"
 INITIAL_EQUITY = 50.0
 LEVERAGE       = 1.0           # ✅ 杠杆降低到 1x
-FEE_RATE       = 0.0007        # ✅ 保留手续费（跑完后改成 0 再测第二组）
+FEE_RATE       = 0.0       # ✅ 保留手续费（跑完后改成 0 再测第二组）
 MARGIN_FRACTION = 0.2          # ✅ 每次仅用 20% 资金入场
 
 # ATR 参数
