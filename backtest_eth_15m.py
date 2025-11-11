@@ -13,15 +13,11 @@ FEE_RATE        = 0.0007             # 单边手续费 0.07%
 ATR_PERIOD      = 34
 ATR_SL_MULT     = 3.5                # ATR 止损倍数
 
-# 百分比移动止盈：浮盈 >= 6% 启用 3% 回撤
+# 百分比移动止盈：浮盈 >= 6% → 3% 回撤
 TRAIL_PCT_TRIGGER = 0.06
 TRAIL_PCT_BACK    = 0.03
 
-# ATR 追踪止盈：浮盈 >= 1.5 * ATR，允许 0.8 * ATR 回撤
-TRAIL_ATR_TRIGGER_MULT = 1.5
-TRAIL_ATR_BACK_MULT    = 0.8
-
-# 回踩带：相对 EMA34 回踩 0.8 * ATR
+# 回踩带：相对 EMA34 回调 0.8 * ATR
 PULLBACK_ATR_MULT = 0.8
 
 # 交易时段（UTC）
@@ -31,7 +27,7 @@ SESSION_END_HOUR   = 21   # 不含 21:00
 # 持仓最长时间：96 根 15m K 线 ≈ 1 天
 MAX_HOLD_BARS = 96
 
-# RSI 动量过滤
+# RSI 仍然计算，但当前版本不强制使用
 RSI_PERIOD      = 14
 RSI_LONG_TH     = 55.0
 RSI_SHORT_TH    = 45.0
@@ -126,27 +122,7 @@ def prepare_indicators(df: pd.DataFrame) -> pd.DataFrame:
                 trend_conf[i] = 0
     df["trend_dir"] = trend_conf
 
-    # 右尾结构：上一根 K 线收在实体一侧
-    rt_up = [False] * len(df)
-    rt_dn = [False] * len(df)
-    for i in range(1, len(df)):
-        o = df.at[i-1, "open"]
-        h = df.at[i-1, "high"]
-        l = df.at[i-1, "low"]
-        c = df.at[i-1, "close"]
-        rng = h - l
-        if rng <= 0:
-            continue
-        # 多头右尾：收在上端 40% 以内，且阳线
-        if c > o and (c - l) >= 0.6 * rng:
-            rt_up[i] = True
-        # 空头右尾：收在下端 40% 以内，且阴线
-        if c < o and (h - c) >= 0.6 * rng:
-            rt_dn[i] = True
-    df["right_tail_up"] = rt_up
-    df["right_tail_dn"] = rt_dn
-
-    return df.dropna(subset=["ema_fast", "ema_slow", "atr", "rsi"]).reset_index(drop=True)
+    return df.dropna(subset=["ema_fast", "ema_slow", "atr"]).reset_index(drop=True)
 
 
 def in_session(dt) -> bool:
@@ -167,7 +143,6 @@ def backtest(df: pd.DataFrame):
     margin_used = 0.0
     size = 0.0
 
-    # 记录最高 / 最低价用于追踪止盈
     high_since_entry = None
     low_since_entry  = None
 
@@ -180,58 +155,42 @@ def backtest(df: pd.DataFrame):
         l  = float(row["low"])
         c  = float(row["close"])
         atr = float(row["atr"])
-        rsi = float(row["rsi"])
         trend_dir = int(row["trend_dir"])
 
-        # === 持仓管理（先处理当前仓位） ===
+        # === 持仓管理 ===
         if in_pos:
             bars_held = i - entry_idx
 
             if direction == 1:
-                # 多单：更新最高价
                 if high_since_entry is None:
                     high_since_entry = h
                 else:
                     high_since_entry = max(high_since_entry, h)
 
-                # ATR 止损
                 sl_atr = entry_price - ATR_SL_MULT * atr
 
-                # 百分比追踪止盈：浮盈 >= 6% → 3% 回撤
                 pct_gain = (high_since_entry - entry_price) / entry_price
                 sl_pct = None
                 if pct_gain >= TRAIL_PCT_TRIGGER:
                     sl_pct = high_since_entry * (1 - TRAIL_PCT_BACK)
 
-                # ATR 追踪止盈：浮盈 >= 1.5*ATR → 0.8*ATR 回撤
-                sl_atr_trail = None
-                atr_gain = (high_since_entry - entry_price) / atr if atr > 0 else 0.0
-                if atr_gain >= TRAIL_ATR_TRIGGER_MULT:
-                    sl_atr_trail = high_since_entry - TRAIL_ATR_BACK_MULT * atr
-
-                # 综合止损价：取最“保守”的（价格最高）
                 stops = [sl_atr]
                 if sl_pct is not None:
                     stops.append(sl_pct)
-                if sl_atr_trail is not None:
-                    stops.append(sl_atr_trail)
                 stop_price = max(stops)
 
                 exit_price = None
                 exit_reason = None
 
-                # 价格触及止损
                 if l <= stop_price <= h:
                     exit_price = stop_price
                     exit_reason = "atr_sl_or_trail"
 
-                # 时间止盈：持仓时间过长
                 if exit_price is None and bars_held >= MAX_HOLD_BARS:
                     exit_price = c
                     exit_reason = "time_exit"
 
-            else:  # direction == -1
-                # 空单：更新最低价
+            else:  # 空单
                 if low_since_entry is None:
                     low_since_entry = l
                 else:
@@ -244,16 +203,9 @@ def backtest(df: pd.DataFrame):
                 if pct_gain >= TRAIL_PCT_TRIGGER:
                     sl_pct = low_since_entry * (1 + TRAIL_PCT_BACK)
 
-                sl_atr_trail = None
-                atr_gain = (entry_price - low_since_entry) / atr if atr > 0 else 0.0
-                if atr_gain >= TRAIL_ATR_TRIGGER_MULT:
-                    sl_atr_trail = low_since_entry + TRAIL_ATR_BACK_MULT * atr
-
                 stops = [sl_atr]
                 if sl_pct is not None:
                     stops.append(sl_pct)
-                if sl_atr_trail is not None:
-                    stops.append(sl_atr_trail)
                 stop_price = min(stops)
 
                 exit_price = None
@@ -267,7 +219,6 @@ def backtest(df: pd.DataFrame):
                     exit_price = c
                     exit_reason = "time_exit"
 
-            # --- 如果有退出信号，结算 ---
             if exit_price is not None:
                 notional = margin_used * LEVERAGE
                 if direction == 1:
@@ -296,7 +247,6 @@ def backtest(df: pd.DataFrame):
                     "bars_held": bars_held,
                 })
 
-                # 清空仓位状态
                 in_pos = False
                 direction = 0
                 entry_price = None
@@ -318,14 +268,12 @@ def backtest(df: pd.DataFrame):
 
             ema_fast = float(row["ema_fast"])
 
-            # 回踩带：相对 EMA34 回调 0.8 * ATR
+            # 回踩带：靠近 EMA34 的 ATR 区间
             if trend_dir == 1:
-                # 多头：从上方向 EMA34 回踩
                 upper = ema_fast
                 lower = ema_fast - PULLBACK_ATR_MULT * atr
                 pullback_ok = lower <= c <= upper
             else:
-                # 空头：从下方向 EMA34 回踩
                 lower = ema_fast
                 upper = ema_fast + PULLBACK_ATR_MULT * atr
                 pullback_ok = lower <= c <= upper
@@ -333,17 +281,8 @@ def backtest(df: pd.DataFrame):
             if not pullback_ok:
                 continue
 
-            # 右尾结构：上一根 K 线顺势实体
-            if trend_dir == 1 and not row["right_tail_up"]:
-                continue
-            if trend_dir == -1 and not row["right_tail_dn"]:
-                continue
-
-            # RSI 动量过滤
-            if trend_dir == 1 and rsi <= RSI_LONG_TH:
-                continue
-            if trend_dir == -1 and rsi >= RSI_SHORT_TH:
-                continue
+            # RSI & 右尾 —— 当前版本不启用，只保留趋势 + 回踩 + 时段
+            # 以后如果要再加回来，可以在这里加判断
 
             # 自适应仓位
             if last_trade_pnl > 0:
@@ -376,7 +315,7 @@ def summarize(df: pd.DataFrame, equity: float, trades: list):
     print(f"数据行数: {len(df)}")
     print(f"时间范围: {df['dt'].iloc[0]} -> {df['dt'].iloc[-1]}")
     print()
-    print("========== 回测结果（新基础版·回踩 + 时段 + 右尾 + ATR + 动量 + 自适应仓位） ==========")
+    print("========== 回测结果（新基础版·回踩 + 时段 + ATR + 自适应仓位） ==========")
 
     n = len(trades)
     wins = sum(1 for t in trades if t["pnl_net"] > 0)
@@ -389,7 +328,6 @@ def summarize(df: pd.DataFrame, equity: float, trades: list):
     avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0.0
     avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0.0
 
-    # 最大回撤
     eq_curve = [INITIAL_EQUITY]
     for t in trades:
         eq_curve.append(t["equity_after"])
@@ -403,7 +341,7 @@ def summarize(df: pd.DataFrame, equity: float, trades: list):
             max_dd = dd
 
     total_ret = (equity - INITIAL_EQUITY) / INITIAL_EQUITY
-    ann_ret = total_ret  # 一年数据，近似等于总收益率
+    ann_ret = total_ret
 
     print(f"总交易数: {n}")
     print(f"胜: {wins}  负: {losses}  和: {flats}")
