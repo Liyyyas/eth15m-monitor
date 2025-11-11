@@ -11,7 +11,7 @@ INITIAL_EQUITY   = 50.0      # 初始资金
 LEVERAGE         = 5.0       # 杠杆
 FEE_RATE         = 0.0007    # 单边手续费
 
-RISK_PER_TRADE   = 0.80      # 每笔使用资金比例（69% 版本原来相当于 0.5，这里调到 0.8）
+RISK_PER_TRADE   = 0.80      # 每笔使用资金比例（高仓位版）
 
 # 趋势均线
 EMA_FAST = 34
@@ -24,12 +24,12 @@ TRAIL_TRIGGER_PCT = 0.06  # 浮盈 ≥ 6% 启动追踪
 TRAIL_PCT        = 0.03   # 3% 回撤止盈
 
 # 回踩与右尾结构参数
-PULLBACK_MAX_PCT = 0.01   # 回踩允许离 EMA34 的最大偏离（1%）
-BREAKOUT_LOOKBACK = 8     # 右尾突破：突破最近 N 根的高/低点
+PULLBACK_MAX_PCT  = 0.01   # 回踩允许离 EMA34 的最大偏离（1%）
+BREAKOUT_LOOKBACK = 8      # 右尾突破：突破最近 N 根的高/低点
 
 # 时段过滤（用新加坡时间 SGT，UTC+8）
-ACTIVE_START_HOUR = 8     # 08:00 SGT
-ACTIVE_END_HOUR   = 23    # 23:00 SGT 之前允许开仓（含 22:45 这一根）
+ACTIVE_START_HOUR = 8      # 08:00 SGT
+ACTIVE_END_HOUR   = 23     # 23:00 SGT 前允许开仓
 
 
 # ========= 工具函数 =========
@@ -91,9 +91,11 @@ def in_active_session(row) -> bool:
 
 def trend_direction(row) -> int:
     """1 = 多头趋势, -1 = 空头趋势, 0 = 无趋势"""
-    if row["ema_fast"] > row["ema_slow"] * 1.001:
+    ema_f = row["ema_fast"]
+    ema_s = row["ema_slow"]
+    if ema_f > ema_s * 1.001:
         return 1
-    elif row["ema_fast"] < row["ema_slow"] * 0.999:
+    elif ema_f < ema_s * 0.999:
         return -1
     else:
         return 0
@@ -148,7 +150,7 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ========= 回测主逻辑（69% 版 + 更大仓位） =========
+# ========= 回测主逻辑 =========
 def backtest(df: pd.DataFrame):
     equity = INITIAL_EQUITY
     in_pos = False
@@ -214,7 +216,7 @@ def backtest(df: pd.DataFrame):
                     exit_reason = "atr_sl_or_trail"
 
                 # 趋势反转：ema_fast < ema_slow
-                elif ema_f < ema_slow:
+                elif ema_f < ema_s:
                     exit_price = c
                     exit_reason = "ema_flip_close"
 
