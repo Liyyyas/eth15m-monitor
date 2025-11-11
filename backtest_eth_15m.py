@@ -1,195 +1,162 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-"""
-新基础版 v2.0
-EMA34 / EMA144 趋势方向 + ATR(34)*3.5 动态止损 + 浮盈≥6%启动3%回撤追踪 + 动态仓位(50%)
-"""
-
 import pandas as pd
-import math
+import numpy as np
 
-# === 基本参数 ===
+# ===== 配置 =====
 CSV_PATH = "okx_eth_15m.csv"
 INITIAL_EQUITY = 50.0
-RISK_FRACTION = 0.5
-LEVERAGE = 5.0
+LEVERAGE = 5
 FEE_RATE = 0.0007
+POSITION_PCT = 0.5  # 仓位比例：资金的 50%
 
-# === ATR 与止损相关参数 ===
 ATR_PERIOD = 34
-ATR_STOP_MULT = 3.5
+ATR_MULT = 3.5
+RSI_PERIOD = 14
+RSI_LONG = 55
+RSI_SHORT = 45
 
-# === 浮盈追踪止盈参数 ===
-FLOAT_TRIGGER = 0.06  # 启动阈值：6%
-FLOAT_TRAIL_PCT = 0.03  # 回撤幅度：3%
+FLOAT_PROFIT_TRIGGER = 0.06
+FLOAT_PROFIT_FALLBACK = 0.03
 
-# === 数据读取 ===
-def load_data(path):
-    df = pd.read_csv(path)
+# ===== 指标计算 =====
+def calc_indicators(df):
+    df["ema34"] = df["close"].ewm(span=34, adjust=False).mean()
+    df["ema144"] = df["close"].ewm(span=144, adjust=False).mean()
 
-    if "iso" in df.columns:
-        df["dt"] = pd.to_datetime(df["iso"], utc=True, errors="coerce")
-    elif "ts" in df.columns:
-        med = pd.to_numeric(df["ts"], errors="coerce").dropna().median()
-        unit = "ms" if med > 1e11 else "s"
-        df["dt"] = pd.to_datetime(pd.to_numeric(df["ts"], errors="coerce"), unit=unit, utc=True)
-    else:
-        first_col = df.columns[0]
-        med = pd.to_numeric(df[first_col], errors="coerce").dropna().median()
-        unit = "ms" if med > 1e11 else "s"
-        df["dt"] = pd.to_datetime(pd.to_numeric(df[first_col], errors="coerce"), unit=unit, utc=True)
+    # ATR(34)
+    df["tr"] = np.maximum(df["high"] - df["low"],
+                          np.maximum(abs(df["high"] - df["close"].shift()),
+                                     abs(df["low"] - df["close"].shift())))
+    df["atr"] = df["tr"].rolling(ATR_PERIOD).mean()
 
-    df = df.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
+    # RSI
+    delta = df["close"].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(RSI_PERIOD).mean()
+    avg_loss = pd.Series(loss).rolling(RSI_PERIOD).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    df["rsi"] = 100 - (100 / (1 + rs))
 
-    for col in ["open", "high", "low", "close"]:
-        if col not in df.columns:
-            raise ValueError(f"CSV 缺少列: {col}")
-
+    df.dropna(inplace=True)
     return df
 
-# === 添加指标 ===
-def add_indicators(df):
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-
-    df["ema34"] = close.ewm(span=34, adjust=False).mean()
-    df["ema144"] = close.ewm(span=144, adjust=False).mean()
-
-    prev_close = close.shift(1)
-    tr1 = (high - low).abs()
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
-
-    return df.dropna(subset=["ema34", "ema144", "atr"]).reset_index(drop=True)
-
-# === 回测逻辑 ===
+# ===== 策略逻辑 =====
 def backtest(df):
     equity = INITIAL_EQUITY
-    in_pos = False
-    direction = 0  # 1=多单, -1=空单
-    entry_price = None
-    pos_size = 0
-    margin_used = 0
-    best_price = None
+    position = 0  # 1=多，-1=空
+    entry_price = 0
     entry_time = None
+    peak = 0
 
     trades = []
 
-    for i, row in df.iterrows():
-        dt, o, h, l, c = row["dt"], row["open"], row["high"], row["low"], row["close"]
-        ema34, ema144, atr = row["ema34"], row["ema144"], row["atr"]
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i - 1]
 
-        if math.isnan(atr) or atr <= 0:
-            continue
+        # EMA方向判断
+        if row["ema34"] > row["ema144"]:
+            ema_dir = 1
+        elif row["ema34"] < row["ema144"]:
+            ema_dir = -1
+        else:
+            ema_dir = 0
 
-        # === 平仓逻辑 ===
-        if in_pos:
-            stop_price = None
-            exit_price = None
-            exit_reason = None
+        # RSI动量过滤
+        if ema_dir == 1 and row["rsi"] > RSI_LONG:
+            signal = 1
+        elif ema_dir == -1 and row["rsi"] < RSI_SHORT:
+            signal = -1
+        else:
+            signal = 0
 
-            if direction == 1:  # 多单
-                best_price = max(best_price, h)
-                gain_pct = (best_price - entry_price) / entry_price
-                base_stop = entry_price - ATR_STOP_MULT * atr
-                if gain_pct >= FLOAT_TRIGGER:
-                    trail_stop = best_price * (1 - FLOAT_TRAIL_PCT)
-                    stop_price = max(base_stop, trail_stop)
-                else:
-                    stop_price = base_stop
-                if l <= stop_price:
-                    exit_price = stop_price
-                    exit_reason = "atr_sl_or_trail"
+        if position == 0 and signal != 0:
+            # 开仓
+            margin = equity * POSITION_PCT
+            entry_price = row["close"]
+            entry_time = row["dt"]
+            position = signal
+            atr = row["atr"]
+            peak = entry_price
+            stop_loss = entry_price - position * atr * ATR_MULT
 
-            elif direction == -1:  # 空单
-                best_price = min(best_price, l)
-                gain_pct = (entry_price - best_price) / entry_price
-                base_stop = entry_price + ATR_STOP_MULT * atr
-                if gain_pct >= FLOAT_TRIGGER:
-                    trail_stop = best_price * (1 + FLOAT_TRAIL_PCT)
-                    stop_price = min(base_stop, trail_stop)
-                else:
-                    stop_price = base_stop
-                if h >= stop_price:
-                    exit_price = stop_price
-                    exit_reason = "atr_sl_or_trail"
+        elif position != 0:
+            price = row["close"]
+            atr = row["atr"]
 
-            if exit_price is not None:
-                notional = abs(entry_price * pos_size)
-                gross_pnl = (exit_price - entry_price) * pos_size
-                fee = notional * FEE_RATE + abs(exit_price * pos_size) * FEE_RATE
-                pnl_net = gross_pnl - fee
-                equity += pnl_net
-                trades.append({
-                    "entry_time": entry_time, "exit_time": dt,
-                    "entry_price": entry_price, "exit_price": exit_price,
-                    "direction": direction, "margin_used": margin_used,
-                    "pnl_net": pnl_net, "pnl_pct_on_margin": pnl_net / margin_used if margin_used else 0,
-                    "equity_after": equity, "exit_reason": exit_reason
-                })
-                in_pos = False
-                direction = 0
-                if equity <= 0:
-                    break
+            # 动态止损价
+            stop_loss = entry_price - position * atr * ATR_MULT
 
-        # === 开仓逻辑 ===
-        if not in_pos and equity > 0:
-            if ema34 > ema144:
-                new_dir = 1
-            elif ema34 < ema144:
-                new_dir = -1
+            # 更新浮盈高点/低点
+            if position == 1:
+                peak = max(peak, price)
+                float_gain = (peak - entry_price) / entry_price
+                if float_gain >= FLOAT_PROFIT_TRIGGER:
+                    stop_loss = max(stop_loss, peak * (1 - FLOAT_PROFIT_FALLBACK))
             else:
-                continue
-            margin = equity * RISK_FRACTION
-            notional = margin * LEVERAGE
-            pos_size = notional / c
-            in_pos = True
-            direction = new_dir
-            entry_price = c
-            entry_time = dt
-            margin_used = margin
-            best_price = c
+                peak = min(peak, price)
+                float_gain = (entry_price - peak) / entry_price
+                if float_gain >= FLOAT_PROFIT_TRIGGER:
+                    stop_loss = min(stop_loss, peak * (1 + FLOAT_PROFIT_FALLBACK))
+
+            # 止损触发
+            close_pos = False
+            if position == 1 and price < stop_loss:
+                close_pos = True
+            elif position == -1 and price > stop_loss:
+                close_pos = True
+            elif (position == 1 and ema_dir == -1) or (position == -1 and ema_dir == 1):
+                close_pos = True
+
+            if close_pos:
+                exit_price = price
+                pnl = (exit_price - entry_price) * position * LEVERAGE * (equity * POSITION_PCT) / entry_price
+                fee = equity * POSITION_PCT * LEVERAGE * FEE_RATE * 2
+                pnl -= fee
+                equity += pnl
+                trades.append({
+                    "entry_time": entry_time,
+                    "exit_time": row["dt"],
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "pnl_net": pnl,
+                    "equity_after": equity,
+                    "direction": position
+                })
+                position = 0
+                entry_price = 0
+                peak = 0
+
+        if equity <= 0:
+            break
 
     return equity, trades
 
-# === 汇总结果 ===
+
+# ===== 主函数 =====
 def summarize(df, equity, trades):
     print(f"数据行数: {len(df)}")
-    print(f"时间范围: {df['dt'].iloc[0]} -> {df['dt'].iloc[-1]}\n")
-
-    n = len(trades)
-    wins = sum(1 for t in trades if t["pnl_net"] > 0)
-    losses = n - wins
+    print(f"时间范围: {df['dt'].iloc[0]} -> {df['dt'].iloc[-1]}")
+    print()
+    print("========== 回测结果（新基础版 + 动量确认RSI） ==========")
+    print(f"总交易数: {len(trades)}")
+    wins = [t for t in trades if t["pnl_net"] > 0]
+    losses = [t for t in trades if t["pnl_net"] <= 0]
+    print(f"胜: {len(wins)}  负: {len(losses)}  胜率: {len(wins)/len(trades)*100 if trades else 0:.2f}%")
     total_pnl = sum(t["pnl_net"] for t in trades)
-    avg_win = sum(t["pnl_net"] for t in trades if t["pnl_net"] > 0) / wins if wins else 0
-    avg_loss = sum(t["pnl_net"] for t in trades if t["pnl_net"] < 0) / losses if losses else 0
-
-    eq_curve = [INITIAL_EQUITY] + [t["equity_after"] for t in trades]
-    peak, max_dd = eq_curve[0], 0
-    for x in eq_curve:
-        peak = max(peak, x)
-        max_dd = min(max_dd, (x - peak) / peak)
-    total_ret = (equity - INITIAL_EQUITY) / INITIAL_EQUITY
-
-    print("========== 回测结果（新基础版 v2.0） ==========")
-    print(f"总交易数: {n}")
-    print(f"胜率: {wins/n*100:.2f}%")
     print(f"总盈亏: {total_pnl:.4f} U")
-    print(f"期末资金: {equity:.4f} U (初始 {INITIAL_EQUITY})")
-    print(f"平均盈利单: {avg_win:.4f} U  | 平均亏损单: {avg_loss:.4f} U")
-    print(f"最大回撤: {max_dd*100:.2f}%")
-    print(f"总收益率: {total_ret*100:.2f}%")
-    print("\n前5笔交易示例:")
+    print(f"期末资金: {equity:.4f} U (初始 {INITIAL_EQUITY} U)")
+    print(f"最大回撤: {min(t['equity_after'] for t in trades)/INITIAL_EQUITY - 1:.2%}" if trades else "")
+    print()
+    print("前5笔交易:")
     for t in trades[:5]:
         print(t)
 
-# === 主程序 ===
 if __name__ == "__main__":
-    df = load_data(CSV_PATH)
-    df = add_indicators(df)
+    df = pd.read_csv(CSV_PATH)
+    df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    df = calc_indicators(df)
     equity, trades = backtest(df)
     summarize(df, equity, trades)
